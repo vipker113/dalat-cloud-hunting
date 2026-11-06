@@ -1,0 +1,123 @@
+import NodeWebSocket from "ws";
+import { CloseCode } from "@colyseus/shared-types";
+import type { ITransport, ITransportEventMap } from "./ITransport.ts";
+
+const WebSocket = globalThis.WebSocket || NodeWebSocket;
+
+// Once per process — the fallback is per-send, and a 60Hz input ring would
+// otherwise flood the console.
+let warnedNoUnreliableChannel = false;
+
+export class WebSocketTransport implements ITransport {
+    ws: WebSocket | NodeWebSocket;
+    protocols?: string | string[];
+
+    events: ITransportEventMap;
+
+    constructor(events: ITransportEventMap) {
+        this.events = events;
+    }
+
+    public send(data: Buffer | Uint8Array): void {
+        this.ws.send(data);
+    }
+
+    /**
+     * WebSocket has no unreliable channel, so this falls back to the reliable
+     * one — which is what every caller is written against (see `sendRequest`,
+     * and the input handle's redundancy ring). Dropping instead loses every
+     * `mode:"unreliable"` input and request silently: the server never sees
+     * them, and the client's pending set grows without bound because nothing
+     * is ever acked.
+     *
+     * The cost of falling back is bandwidth, not correctness — an input ring
+     * carries `historySize` redundant slots the ordered channel doesn't need,
+     * and the server dedupes them by wire seq exactly as it would over
+     * datagrams. Use `@colyseus/h3-transport` for real unreliable delivery.
+     */
+    public sendUnreliable(data: Buffer | Uint8Array): void {
+        if (!warnedNoUnreliableChannel) {
+            warnedNoUnreliableChannel = true;
+            console.warn("@colyseus/sdk: the WebSocket transport has no unreliable channel — sending `mode:\"unreliable\"` traffic reliably instead. Use @colyseus/h3-transport (WebTransport) for datagram delivery.");
+        }
+        this.send(data);
+    }
+
+    /**
+     * @param url URL to connect to
+     * @param headers custom headers to send with the connection (only supported in Node.js. Web Browsers do not allow setting custom headers)
+     */
+    public connect(url: string, headers?: any): void {
+        if (typeof document !== "undefined") {
+            // browser: the options object would be read as an invalid subprotocol,
+            // which Safari logs to the console even though the throw is caught
+            this.ws = new WebSocket(url, this.protocols);
+
+        } else {
+            try {
+                // Node or Bun environments (supports custom headers)
+                this.ws = new WebSocket(url, { headers, protocols: this.protocols });
+
+            } catch (e) {
+                // runtimes without the options form
+                this.ws = new WebSocket(url, this.protocols);
+            }
+        }
+
+        const ws = this.ws;
+        let opened = false;
+        let closed = false;
+
+        const onclose = (event: any) => {
+            if (closed) { return; }
+            closed = true;
+            this.events.onclose?.(event);
+        };
+
+        ws.binaryType = 'arraybuffer';
+        ws.onopen = (event) => {
+            opened = true;
+            this.events.onopen?.(event);
+        };
+        ws.onmessage = (event) => this.events.onmessage?.(event);
+        ws.onclose = onclose;
+        ws.onerror = (event) => {
+            // undici (Node 22's global WebSocket) fires no close for a socket that never opened;
+            // browsers and `ws` have closed it by the next tick. Scheduled first: a listener may throw.
+            if (!opened) {
+                // forwarded once: undici fires error again from every close() while still CONNECTING
+                ws.onerror = null;
+
+                setTimeout(() => {
+                    // close(MAY_TRY_RECONNECT) detaches the handler and reports the close itself
+                    if (ws.onclose === onclose) { onclose({ code: CloseCode.ABNORMAL_CLOSURE, reason: "" }); }
+                }, 0);
+            }
+
+            this.events.onerror?.(event);
+        };
+    }
+
+    public close(code?: number, reason?: string) {
+        //
+        // trigger the onclose event immediately if the code is MAY_TRY_RECONNECT
+        // when "offline" event is triggered, the close frame is delayed. this
+        // way client can try to reconnect immediately.
+        //
+        try {
+            if (code === CloseCode.MAY_TRY_RECONNECT && this.events.onclose) {
+                this.ws.onclose = null;
+                this.events.onclose({ code, reason });
+            }
+
+        } finally {
+            // then we close the connection, even if a room listener (onDrop, onLeave) threw
+            this.ws.close(code, reason);
+        }
+    }
+
+    get isOpen() {
+        return this.ws.readyState === WebSocket.OPEN;
+    }
+
+}

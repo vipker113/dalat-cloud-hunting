@@ -1,0 +1,27 @@
+{
+  "name": "dalat-cloud-hunting",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Chạm Mây Đà Lạt – Multiplayer 3D Online World (Vertical Slice v0.1)",
+  "workspaces": [
+    "packages/*",
+    "apps/*",
+    "tools/*"
+  ],
+  "scripts": {
+    "dev:server": "bun run --cwd apps/server dev",
+    "dev:web": "bun run --cwd apps/web dev",
+    "build:web": "bun run --cwd apps/web build",
+    "typecheck": "bun run --cwd packages/protocol typecheck && bun run --cwd apps/server typecheck && bun run --cwd apps/web typecheck",
+    "stress:bots": "bun run apps/server/src/botSwarm.ts"
+  },
+  "devDependencies": {
+    "@gltf-transform/cli": "^4.3.0",
+    "@gltf-transform/core": "^4.3.0",
+    "@gltf-transform/extensions": "^4.3.0",
+    "@gltf-transform/functions": "^4.3.0",
+    "meshoptimizer": "^0.22.0",
+    "playwright-core": "^1.51.0",
+    "typescript": "^5.8.2"
+  }
+}
