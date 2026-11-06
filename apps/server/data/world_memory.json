@@ -1,0 +1,76 @@
+{
+  "polaroids": [
+    {
+      "id": "seed-polaroid-1",
+      "authorName": "Minh Thư",
+      "caption": "Biển mây đầu mùa tràn qua đồi chè cổ, nắng ấm đến tận đầu ngón tay ✨",
+      "landmarkId": "cau-go-san-may",
+      "landmarkName": "Cầu Gỗ Săn Mây Cầu Đất",
+      "weatherId": "golden_cloud_sea",
+      "gameTimeLabel": "05:32 AM",
+      "altitudeASL": 1648,
+      "imageDataUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MDAgMzIwIj4KICA8ZGVmcz4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0ic2t5IiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiMyNDM1NUMiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjRkZCMzdCIi8+CiAgICA8L2xpbmVhckdyYWRpZW50PgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJjbG91ZCIgeDE9IjAiIHkxPSIwIiB4Mj0iMCIgeTI9IjEiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjRkZGM0UyIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzdEOTVCQSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjQwMCIgaGVpZ2h0PSIzMjAiIGZpbGw9InVybCgjc2t5KSIvPgogIAogIDxjaXJjbGUgY3g9IjI4MiIgY3k9IjEzMiIgcj0iMzYiIGZpbGw9IiNGRkQ1ODQiIG9wYWNpdHk9IjAuMzIiLz4KICA8Y2lyY2xlIGN4PSIyODIiIGN5PSIxMzIiIHI9IjIwIiBmaWxsPSIjRkZENTg0IiBvcGFjaXR5PSIwLjkyIi8+CiAgPHBhdGggZD0iTTAgMTkwIFE5NSAxNTQgMTk1IDE4MiBUNDAwIDE3MiBMNDAwIDMyMCBMMCAzMjAgWiIgZmlsbD0iIzI0M0EzMSIgb3BhY2l0eT0iMC41NSIvPgogIDxnIHN0cm9rZT0iI0ZGRjhFQiIgc3Ryb2tlLXdpZHRoPSIyIiBvcGFjaXR5PSIwLjg1Ij48bGluZSB4MT0iMjU1IiB5MT0iMTQ1IiB4Mj0iMjU1IiB5Mj0iMTk1Ii8+PGxpbmUgeDE9IjI1NSIgeTE9IjE0NSIgeDI9IjI0MyIgeTI9IjEzMiIvPjxsaW5lIHgxPSIyNTUiIHkxPSIxNDUiIHgyPSIyNjkiIHkyPSIxMzgiLz48bGluZSB4MT0iMjU1IiB5MT0iMTQ1IiB4Mj0iMjUyIiB5Mj0iMTYxIi8+PGxpbmUgeDE9IjMxMiIgeTE9IjE1MiIgeDI9IjMxMiIgeTI9IjE5OCIvPjxsaW5lIHgxPSIzMTIiIHkxPSIxNTIiIHgyPSIzMDAiIHkyPSIxNDAiLz48bGluZSB4MT0iMzEyIiB5MT0iMTUyIiB4Mj0iMzI1IiB5Mj0iMTQ2Ii8+PGxpbmUgeDE9IjMxMiIgeTE9IjE1MiIgeDI9IjMxMCIgeTI9IjE2NyIvPjwvZz4KICA8cGF0aCBkPSJNLTEwIDIxMiBDNDUgMTk0LCA5OCAyMjUsIDE1NSAyMDggQzIxNSAxOTIsIDI3MiAyMjIsIDMzNSAyMDQgQzM2OCAxOTUsIDM5MiAyMDYsIDQxMCAyMDIgTDQxMCAzMjAgTC0xMCAzMjAgWiIgZmlsbD0idXJsKCNjbG91ZCkiLz4KICAKICA8cGF0aCBkPSJNMCAyNDYgTDY4IDIxOCBMMTQyIDI1NCBMMjI0IDIzOCBMMzIyIDI2OCBMNDAwIDI0MiBMNDAwIDMyMCBMMCAzMjAgWiIgZmlsbD0iIzI0M0EzMSIvPgogIDxnIGZpbGw9IiMxNjI2MUUiPgogICAgPHBvbHlnb24gcG9pbnRzPSI0OCwxODYgMzMsMjQ4IDYzLDI0OCIvPgogICAgPHBvbHlnb24gcG9pbnRzPSI0OCwxNjggMzYsMjE2IDYwLDIxNiIvPgogICAgPHBvbHlnb24gcG9pbnRzPSI4NCwxOTggNzEsMjUyIDk3LDI1MiIvPgogIDwvZz4KPC9zdmc+",
+      "likes": 18,
+      "createdAt": 1793961977433
+    },
+    {
+      "id": "seed-polaroid-2",
+      "authorName": "Hoàng Nam",
+      "caption": "4h40 sáng chạy xe Cub lên đồi, dưới chân là cả ngân hà nhà lồng Thái Phiên 🏮",
+      "landmarkId": "dai-ngam-den",
+      "landmarkName": "Đài Ngắm Thung Lũng Đèn & Dốc Dã Quỳ",
+      "weatherId": "golden_cloud_sea",
+      "gameTimeLabel": "04:42 AM",
+      "altitudeASL": 1534,
+      "imageDataUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MDAgMzIwIj4KICA8ZGVmcz4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0ic2t5IiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiMxMTFCMzAiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjNDM0RTc4Ii8+CiAgICA8L2xpbmVhckdyYWRpZW50PgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJjbG91ZCIgeDE9IjAiIHkxPSIwIiB4Mj0iMCIgeTI9IjEiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjNUU3MjlDIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzIzMkY0RCIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjQwMCIgaGVpZ2h0PSIzMjAiIGZpbGw9InVybCgjc2t5KSIvPgogIDxjaXJjbGUgY3g9IjYyIiBjeT0iNDQiIHI9IjEuNCIgZmlsbD0iI0ZGRjdENiIgb3BhY2l0eT0iMC44Ii8+PGNpcmNsZSBjeD0iMTQ4IiBjeT0iMjkiIHI9IjEuMiIgZmlsbD0iI0ZGRjdENiIgb3BhY2l0eT0iMC43Ii8+PGNpcmNsZSBjeD0iMjk1IiBjeT0iNTIiIHI9IjEuNSIgZmlsbD0iI0ZGRjdENiIgb3BhY2l0eT0iMC44NSIvPjxjaXJjbGUgY3g9IjM0OCIgY3k9IjM0IiByPSIxLjEiIGZpbGw9IiNGRkY3RDYiIG9wYWNpdHk9IjAuNjUiLz4KICA8Y2lyY2xlIGN4PSIzMTgiIGN5PSIxNzUiIHI9IjM2IiBmaWxsPSIjRjZCRDYwIiBvcGFjaXR5PSIwLjMyIi8+CiAgPGNpcmNsZSBjeD0iMzE4IiBjeT0iMTc1IiByPSIyMCIgZmlsbD0iI0Y2QkQ2MCIgb3BhY2l0eT0iMC45MiIvPgogIDxwYXRoIGQ9Ik0wIDE5MCBROTUgMTU0IDE5NSAxODIgVDQwMCAxNzIgTDQwMCAzMjAgTDAgMzIwIFoiIGZpbGw9IiMxODI0MkIiIG9wYWNpdHk9IjAuNTUiLz4KICAKICA8cGF0aCBkPSJNLTEwIDIxMiBDNDUgMTk0LCA5OCAyMjUsIDE1NSAyMDggQzIxNSAxOTIsIDI3MiAyMjIsIDMzNSAyMDQgQzM2OCAxOTUsIDM5MiAyMDYsIDQxMCAyMDIgTDQxMCAzMjAgTC0xMCAzMjAgWiIgZmlsbD0idXJsKCNjbG91ZCkiLz4KICA8ZWxsaXBzZSBjeD0iMjE1IiBjeT0iMjQ4IiByeD0iOTUiIHJ5PSIxOCIgZmlsbD0iI0ZGQjM0NyIgb3BhY2l0eT0iMC40OCIvPjxlbGxpcHNlIGN4PSIxNDUiIGN5PSIyNjIiIHJ4PSI2NCIgcnk9IjEyIiBmaWxsPSIjRkZEMjdEIiBvcGFjaXR5PSIwLjQyIi8+CiAgPHBhdGggZD0iTTAgMjQ2IEw2OCAyMTggTDE0MiAyNTQgTDIyNCAyMzggTDMyMiAyNjggTDQwMCAyNDIgTDQwMCAzMjAgTDAgMzIwIFoiIGZpbGw9IiMxODI0MkIiLz4KICA8ZyBmaWxsPSIjMTYyNjFFIj4KICAgIDxwb2x5Z29uIHBvaW50cz0iNDgsMTg2IDMzLDI0OCA2MywyNDgiLz4KICAgIDxwb2x5Z29uIHBvaW50cz0iNDgsMTY4IDM2LDIxNiA2MCwyMTYiLz4KICAgIDxwb2x5Z29uIHBvaW50cz0iODQsMTk4IDcxLDI1MiA5NywyNTIiLz4KICA8L2c+Cjwvc3ZnPg==",
+      "likes": 23,
+      "createdAt": 1793958797433
+    },
+    {
+      "id": "seed-polaroid-3",
+      "authorName": "An Nhiên",
+      "caption": "Ly sữa đậu nành nóng bên hiên gỗ thông, nghe tiếng guitar mộc giữa sương mai ☕",
+      "landmarkId": "quan-mo-suong",
+      "landmarkName": "Tiệm Cà Phê Gỗ \"Mơ Sương\"",
+      "weatherId": "morning_mist_boil",
+      "gameTimeLabel": "06:50 AM",
+      "altitudeASL": 1585,
+      "imageDataUrl": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA0MDAgMzIwIj4KICA8ZGVmcz4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0ic2t5IiB4MT0iMCIgeTE9IjAiIHgyPSIwIiB5Mj0iMSI+CiAgICAgIDxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiMzRTdDQjgiLz4KICAgICAgPHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjRkNFMUI2Ii8+CiAgICA8L2xpbmVhckdyYWRpZW50PgogICAgPGxpbmVhckdyYWRpZW50IGlkPSJjbG91ZCIgeDE9IjAiIHkxPSIwIiB4Mj0iMCIgeTI9IjEiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjRkZGRkZGIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzlDQjRDRSIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICA8L2RlZnM+CiAgPHJlY3Qgd2lkdGg9IjQwMCIgaGVpZ2h0PSIzMjAiIGZpbGw9InVybCgjc2t5KSIvPgogIAogIDxjaXJjbGUgY3g9IjI0NSIgY3k9Ijk2IiByPSIzNiIgZmlsbD0iI0ZGRThCMyIgb3BhY2l0eT0iMC4zMiIvPgogIDxjaXJjbGUgY3g9IjI0NSIgY3k9Ijk2IiByPSIyMCIgZmlsbD0iI0ZGRThCMyIgb3BhY2l0eT0iMC45MiIvPgogIDxwYXRoIGQ9Ik0wIDE5MCBROTUgMTU0IDE5NSAxODIgVDQwMCAxNzIgTDQwMCAzMjAgTDAgMzIwIFoiIGZpbGw9IiMyRTRBM0UiIG9wYWNpdHk9IjAuNTUiLz4KICAKICA8cGF0aCBkPSJNLTEwIDIxMiBDNDUgMTk0LCA5OCAyMjUsIDE1NSAyMDggQzIxNSAxOTIsIDI3MiAyMjIsIDMzNSAyMDQgQzM2OCAxOTUsIDM5MiAyMDYsIDQxMCAyMDIgTDQxMCAzMjAgTC0xMCAzMjAgWiIgZmlsbD0idXJsKCNjbG91ZCkiLz4KICAKICA8cGF0aCBkPSJNMCAyNDYgTDY4IDIxOCBMMTQyIDI1NCBMMjI0IDIzOCBMMzIyIDI2OCBMNDAwIDI0MiBMNDAwIDMyMCBMMCAzMjAgWiIgZmlsbD0iIzJFNEEzRSIvPgogIDxnIGZpbGw9IiMxNjI2MUUiPgogICAgPHBvbHlnb24gcG9pbnRzPSI0OCwxODYgMzMsMjQ4IDYzLDI0OCIvPgogICAgPHBvbHlnb24gcG9pbnRzPSI0OCwxNjggMzYsMjE2IDYwLDIxNiIvPgogICAgPHBvbHlnb24gcG9pbnRzPSI4NCwxOTggNzEsMjUyIDk3LDI1MiIvPgogIDwvZz4KPC9zdmc+",
+      "likes": 14,
+      "createdAt": 1793955497433
+    }
+  ],
+  "windChimeNotes": [
+    {
+      "id": "seed-chime-1",
+      "authorName": "Thảo Vy",
+      "message": "Mong những người thương nhau sẽ luôn tìm thấy nhau giữa sương mù Đà Lạt.",
+      "createdAt": 1793963417433
+    },
+    {
+      "id": "seed-chime-2",
+      "authorName": "Bảo Khánh",
+      "message": "Chúc bản thân tuổi mới bình yên như sáng sớm ngồi nghe gió đồi Cầu Đất.",
+      "createdAt": 1793961677433
+    },
+    {
+      "id": "seed-chime-3",
+      "authorName": "Minh Khôi",
+      "message": "Hẹn một ngày quay lại cùng người ấy ngắm bình minh 5 giờ sáng trên cầu gỗ.",
+      "createdAt": 1793959217433
+    },
+    {
+      "id": "seed-chime-4",
+      "authorName": "Lan Anh",
+      "message": "Gửi lại hết muộn phiền cho mây trời Langbiang, mang về một trái tim thật ấm.",
+      "createdAt": 1793956397433
+    },
+    {
+      "id": "seed-chime-5",
+      "authorName": "Đức Duy",
+      "message": "Cảm ơn Đà Lạt vì ly cà phê phin nóng và những nụ cười lạ mà quen.",
+      "createdAt": 1793951897433
+    }
+  ],
+  "updatedAt": 1793964522887
+}

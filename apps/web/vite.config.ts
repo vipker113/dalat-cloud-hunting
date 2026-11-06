@@ -9,6 +9,15 @@ export default defineConfig({
   },
   build: {
     target: 'es2022',
-    chunkSizeWarningLimit: 1200,
+    chunkSizeWarningLimit: 900,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          'three-core': ['three', 'three-mesh-bvh', 'meshoptimizer'],
+          'r3f-drei': ['@react-three/fiber', '@react-three/drei'],
+          'multiplayer': ['@colyseus/sdk', 'zustand'],
+        },
+      },
+    },
   },
 });

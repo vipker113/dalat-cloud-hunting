@@ -99,3 +99,4 @@ export const HIGHLAND_PALETTE = {
   scarves: ['#E8D5B7', '#C94A38', '#E09F3E', '#5E8C6A', '#6B8CAE', '#F2E9E4'],
   hair: ['#231B18', '#4A3326', '#6E4730', '#8C6239', '#2C3545'],
 } as const;
+

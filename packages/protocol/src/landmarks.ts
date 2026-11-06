@@ -46,9 +46,9 @@ export const LANDMARKS: Record<LandmarkId, LandmarkSpec> = {
     'quan-mo-suong',
     'Tiệm Cà Phê Gỗ "Mơ Sương"',
     'Hiên gỗ lưng đồi, phin cà phê nóng, bếp lửa hồng & góc Guitar Acoustic',
-    -38,
-    30,
-    [140, 125, -20],
+    -30.8,
+    32.5,
+    [185, 146, -25],
     '04:30 – 07:00 AM & Chiều sương'
   ),
   'cau-go-san-may': makeLandmark(
@@ -57,25 +57,25 @@ export const LANDMARKS: Record<LandmarkId, LandmarkSpec> = {
     'Đỉnh đồi chè cổ 1927 hướng thẳng Mặt Trời mọc & 5 tua-bin điện gió',
     89,
     -75,
-    [260, 165, -80],
+    [260, 215, -75],
     '05:05 – 06:30 AM (Khoảnh khắc Vàng)'
   ),
   'cay-thong-co-don': makeLandmark(
     'cay-thong-co-don',
     'Đồi Thông Cô Đơn Thiên Phúc Đức',
     'Cây thông nghiêng gió treo thẻ ước nguyện nhìn về núi đôi Langbiang 2.167m',
-    -93,
-    -150,
-    [-95, 195, -420],
+    -94.5,
+    -140.5,
+    [-96, 198, -420],
     '05:20 – 06:45 AM (Nắng xiên ngang)'
   ),
   'dai-ngam-den': makeLandmark(
     'dai-ngam-den',
     'Đài Ngắm Thung Lũng Đèn & Dốc Dã Quỳ',
     'Rìa sương sớm bên xe Super Cub 50 nhìn xuống biển đèn vàng nhà lồng Thái Phiên',
-    -112,
-    142,
-    [190, 45, 95],
+    17.2,
+    128.5,
+    [235, 32, 146],
     '04:15 – 05:15 AM (Trước rạng đông)'
   ),
   'gac-che-1927': makeLandmark(
@@ -84,7 +84,7 @@ export const LANDMARKS: Record<LandmarkId, LandmarkSpec> = {
     'Điểm ẩn khuất gió nơi thảm cỏ sương trắng chuyển hồng phấn khi chạm nắng đầu',
     -12,
     -174,
-    [160, 145, -140],
+    [160, 178, -140],
     '05:10 – 06:00 AM (Điểm ẩn)',
     true
   ),
@@ -109,7 +109,7 @@ export const SHARED_BENCHES: BenchSpot[] = [
   {
     id: 'bench-cafe-2',
     label: 'Ghế đôi hiên Mơ Sương #2',
-    position: [-27.5, sampleWalkableHeight(-27.5, 34), 34],
+    position: [-27.5, sampleWalkableHeight(-27.5, 35.5), 35.5],
     yaw: Math.PI / 2,
   },
   {

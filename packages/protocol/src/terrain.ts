@@ -73,27 +73,41 @@ export function fbm2D(x: number, z: number, octaves = 3): number {
 }
 
 /**
- * Trail network segments [x, z] connecting all 5 signature Da Lat landmarks smoothly
+ * Graded trail segments [ax, az, bx, bz] with target endpoint heights [ya, yb]
+ * guaranteeing gentle highland grades (< 24 deg everywhere) and flush deck transitions.
  */
-export const TRAIL_SEGMENTS: Array<[number, number, number, number]> = [
-  // Trail 1: Dai Ngam Thung Lung Den (-115, 145) -> Tiem Ca Phe Mo Suong (-45, 30)
-  [-115, 145, -82, 92],
-  [-82, 92, -45, 30],
-  // Trail 2: Tiem Ca Phe Mo Suong (-45, 30) -> Tea Ridge Saddle (12, -25) -> Cau Go Summit (52, -75)
-  [-45, 30, 12, -25],
-  [12, -25, 52, -75],
-  // Trail 3: Tea Ridge Saddle (12, -25) -> Hom Co Tuyet (-12, -165) -> Cay Thong Co Don (-95, -155)
-  [12, -25, -12, -165],
-  [-12, -165, -95, -155],
-  // Trail 4: Forest loop Cay Thong Co Don (-95, -155) -> Mo Suong West Ridge (-85, -35) -> (-45, 30)
-  [-95, -155, -85, -35],
-  [-85, -35, -45, 30],
+const GRADED_TRAILS: ReadonlyArray<[number, number, number, number, number, number]> = [
+  // 0: Đài Ngắm Thung Lũng Đèn (18, 128, y=112) -> Dốc Hoa Dã Quỳ (-52.5, 58, y=131.0)
+  [18, 128, -52.5, 58, 112.0, 131.0],
+  // 1: Dốc Hoa Dã Quỳ (-52.5, 58, y=131.0) -> Sân Tây Tiệm Cà Phê Mơ Sương (-52.5, 28, y=135.15)
+  [-52.5, 58, -52.5, 28, 131.0, 135.15],
+  // 2: Mơ Sương (-52.5, 28, y=135.15) -> Triền Chè Dưới (-24, -12, y=154.5)
+  [-52.5, 28, -24, -12, 135.15, 154.5],
+  // 3: Triền Chè Dưới (-24, -12, y=154.5) -> Yên Đồi Chè Cầu Đất (14, -45, y=175.5)
+  [-24, -12, 14, -45, 154.5, 175.5],
+  // 4: Yên Đồi Chè (14, -45, y=175.5) -> Đầu Cầu Gỗ Săn Mây (50, -75, y=196.15)
+  [14, -45, 50, -75, 175.5, 196.15],
+  // 5: Yên Đồi Chè (14, -45, y=175.5) -> Hõm Cỏ Tuyết / Gác Chè 1927 (-12, -174, y=168.0)
+  [14, -45, -12, -174, 175.5, 168.0],
+  // 6: Hõm Cỏ Tuyết (-12, -174, y=168.0) -> Đồi Thông Cô Đơn (-94.5, -140.5, y=176.0)
+  [-12, -174, -94.5, -140.5, 168.0, 176.0],
+  // 7: Đồi Thông Cô Đơn (-94.5, -140.5, y=176.0) -> Rừng Thông Tây (-84, -52, y=155.5)
+  [-94.5, -140.5, -84, -52, 176.0, 155.5],
+  // 8: Rừng Thông Tây (-84, -52, y=155.5) -> Sân Tây Mơ Sương (-52.5, 28, y=135.15)
+  [-84, -52, -52.5, 28, 155.5, 135.15],
 ];
+
+/**
+ * Trail network segments [ax, az, bx, bz] connecting all 5 signature Da Lat landmarks smoothly.
+ */
+export const TRAIL_SEGMENTS: Array<[number, number, number, number]> = GRADED_TRAILS.map(
+  ([ax, az, bx, bz]) => [ax, az, bx, bz]
+);
 
 export function distanceToTrail(x: number, z: number): number {
   let minD = 9999;
-  for (let i = 0; i < TRAIL_SEGMENTS.length; i++) {
-    const [ax, az, bx, bz] = TRAIL_SEGMENTS[i];
+  for (let i = 0; i < GRADED_TRAILS.length; i++) {
+    const [ax, az, bx, bz] = GRADED_TRAILS[i];
     const { dist } = distToSegment2D(x, z, ax, az, bx, bz);
     if (dist < minD) minD = dist;
   }
@@ -105,62 +119,101 @@ export function distanceToTrail(x: number, z: number): number {
  * Sculpted specifically for the 900m x 900m "Cầu Đất – Mơ Sương" Hero Vertical Slice.
  */
 export function sampleGroundHeight(x: number, z: number): number {
-  // 1. Base highland ridge sloping down toward East (+X) and South-East (+X, +Z) valley basin
-  const eastDrop = smoothstep(-90, 210, x + z * 0.28);
+  // 1. Base highland ridge sloping down toward East (+X) and Northern Suối Vàng / Dankia valley (-Z)
+  const eastDrop = smoothstep(-90, 185, x + z * 0.26);
   let h = 136 * (1 - eastDrop) + 14 * eastDrop;
 
-  // 2. Summit 1: Đồi Chè Cầu Đất & Cầu Gỗ Crest around (52, -75) -> ~196m (1,646m ASL)
-  h += 78 * gaussian2D(x, z, 46, -78, 92, 86);
+  const northValleyDrop = smoothstep(-165, -285, z);
+  h = h * (1 - northValleyDrop * 0.62) + 54 * (northValleyDrop * 0.62);
 
-  // 3. Summit 2: Đồi Thông Cô Đơn North Knoll around (-95, -155) -> ~158m (1,608m ASL)
-  h += 38 * gaussian2D(x, z, -98, -158, 82, 74);
+  // 2. Summit 1: Đồi Chè Cầu Đất & Cầu Gỗ Crest around (48, -76) -> ~196.15m (1,646m ASL)
+  h += 101 * gaussian2D(x, z, 48, -76, 106, 94);
 
-  // 4. Secret Pink-Grass Hollow (Hõm Cỏ Tuyết / Gác Chè 1927) around (-12, -172) -> ~166m
-  h += 34 * gaussian2D(x, z, -12, -178, 64, 58);
+  // 3. Summit 2: Đồi Thông Cô Đơn North Knoll around (-95, -148) -> ~176m (1,626m ASL)
+  h += 42 * gaussian2D(x, z, -96, -148, 76, 58);
 
-  // 5. Western Pine Backdrop Ridge so west horizon feels lush & sheltered
-  h += 48 * smoothstep(-160, -390, x);
+  // 4. Secret Pink-Grass Hollow (Hõm Cỏ Tuyết / Gác Chè 1927) around (-15, -176) -> ~168m
+  h += 26 * gaussian2D(x, z, -15, -176, 48, 42);
 
-  // 6. Gentle organic highland undulation
-  const undulation = fbm2D(x * 0.011, z * 0.011, 3) * 5.2;
-  // Flatten undulation near key plateaus so buildings sit rock-solid!
-  const cafeFlatMask = smoothstep(34, 15, Math.hypot(x - -45, z - 30));
-  const pierEntryFlat = smoothstep(26, 11, Math.hypot(x - 52, z - -75));
-  const trailheadFlat = smoothstep(24, 10, Math.hypot(x - -115, z - 145));
-  const lonelyFlat = smoothstep(22, 9, Math.hypot(x - -95, z - -155));
+  // 5. Southeast Scenic Bluff (Đài Ngắm Thung Lũng Đèn) around (18, 128) -> ~112m overlooking valley
+  h += 28 * gaussian2D(x, z, 14, 128, 44, 42);
 
-  const flattenWeight = clamp(cafeFlatMask + pierEntryFlat + trailheadFlat + lonelyFlat, 0, 1);
-  h += undulation * (1 - flattenWeight * 0.92);
+  // 6. Western Pine Backdrop Ridge (south of z = -135 so northern Langbiang sightline stays wide open)
+  h += 44 * smoothstep(-175, -390, x) * (1 - smoothstep(-125, -210, z));
 
-  // Lock exact plateau elevations smoothly
+  // 7. Gentle organic highland undulation (damped near plateaus & trails)
+  const undulation = fbm2D(x * 0.011, z * 0.011, 3) * 4.6;
+  const cafeFlatMask = smoothstep(38, 15, Math.hypot(x - -46, z - 28));
+  const pierEntryFlat = smoothstep(28, 12, Math.hypot(x - 50, z - -75));
+  const overlookFlat = smoothstep(26, 11, Math.hypot(x - 18, z - 128));
+  const lonelyFlat = smoothstep(30, 14, Math.hypot(x - -95, z - -149));
+  const pinkHollowFlat = smoothstep(28, 12, Math.hypot(x - -15, z - -176));
+
+  const flattenWeight = clamp(
+    cafeFlatMask + pierEntryFlat + overlookFlat + lonelyFlat + pinkHollowFlat,
+    0,
+    1
+  );
+  h += undulation * (1 - flattenWeight * 0.96);
+
+  // Lock exact landmark plateau elevations smoothly to match surrounding hill crests
   if (cafeFlatMask > 0.001) {
-    h = h * (1 - cafeFlatMask) + 135.0 * cafeFlatMask;
+    h = h * (1 - cafeFlatMask) + 135.15 * cafeFlatMask;
   }
   if (pierEntryFlat > 0.001) {
-    h = h * (1 - pierEntryFlat) + 196.0 * pierEntryFlat;
+    h = h * (1 - pierEntryFlat) + 196.15 * pierEntryFlat;
   }
-  if (trailheadFlat > 0.001) {
-    h = h * (1 - trailheadFlat) + 84.0 * trailheadFlat;
+  if (overlookFlat > 0.001) {
+    h = h * (1 - overlookFlat) + 112.0 * overlookFlat;
   }
   if (lonelyFlat > 0.001) {
-    h = h * (1 - lonelyFlat) + 158.0 * lonelyFlat;
+    h = h * (1 - lonelyFlat) + 176.0 * lonelyFlat;
+  }
+  if (pinkHollowFlat > 0.001) {
+    h = h * (1 - pinkHollowFlat) + 168.0 * pinkHollowFlat;
   }
 
-  // Subtle terraced steps on Cầu Đất tea slopes!
-  const teaZone = gaussian2D(x, z, 36, -58, 68, 68) * (1 - flattenWeight);
-  if (teaZone > 0.22 && distanceToTrail(x, z) > 4.2) {
+  // Smooth inverse-distance blended trail elevation across junctions
+  let minTrailDist = 9999;
+  let weightSum = 0;
+  let weightedTrailY = 0;
+  for (let i = 0; i < GRADED_TRAILS.length; i++) {
+    const [ax, az, bx, bz, ya, yb] = GRADED_TRAILS[i];
+    const { dist, t } = distToSegment2D(x, z, ax, az, bx, bz);
+    if (dist < minTrailDist) {
+      minTrailDist = dist;
+    }
+    if (dist < 9.5) {
+      const segY = ya + (yb - ya) * t;
+      const w = Math.pow(1 - dist / 9.5, 3) / (dist * dist + 0.35);
+      weightedTrailY += segY * w;
+      weightSum += w;
+    }
+  }
+  const gradedTrailY = weightSum > 0 ? weightedTrailY / weightSum : h;
+
+  // Subtle terraced steps on Cầu Đất tea slopes (away from trails & plateaus)
+  const teaZone = gaussian2D(x, z, 36, -58, 66, 66) * (1 - flattenWeight);
+  if (teaZone > 0.22 && minTrailDist > 6.5) {
     const stepH = 1.65;
-    const terraced = Math.floor(h / stepH) * stepH + smoothstep(0.0, 0.45, (h % stepH) / stepH) * stepH;
-    h = h * (1 - teaZone * 0.65) + terraced * (teaZone * 0.65);
+    const terraced =
+      Math.floor(h / stepH) * stepH + smoothstep(0.0, 0.48, (h % stepH) / stepH) * stepH;
+    h = h * (1 - teaZone * 0.62) + terraced * (teaZone * 0.62);
   }
 
-  // Wind turbine hill pedestals rising through the eastern cloud sea
+  // Smooth graded red-basalt trail embankment (< 24 deg guaranteed everywhere!)
+  if (minTrailDist < 9.0) {
+    const trailBlend = 1 - smoothstep(2.8, 9.0, minTrailDist);
+    h = h * (1 - trailBlend) + gradedTrailY * trailBlend;
+  }
+
+  // Wind turbine valley pedestals (submerged cleanly at 42..48m beneath the cloud sea)
   const turbineCoords: Array<[number, number, number]> = [
-    [185, -145, 92],
-    [235, -65, 84],
-    [215, 28, 78],
-    [295, -185, 88],
-    [310, -15, 72],
+    [185, -145, 48],
+    [235, -65, 46],
+    [215, 28, 44],
+    [295, -185, 48],
+    [310, -15, 42],
   ];
   for (const [tx, tz, peakY] of turbineCoords) {
     const g = gaussian2D(x, z, tx, tz, 36, 36);
@@ -179,20 +232,20 @@ export function sampleGroundHeight(x: number, z: number): number {
 export function sampleWalkableHeight(x: number, z: number): number {
   const ground = sampleGroundHeight(x, z);
 
-  // 1. Cầu Gỗ Săn Mây wooden bridge extending East from (52, -75) to circular deck at (92, -75)
-  if (x >= 50 && x <= 99 && Math.abs(z - -75) <= 6.8) {
-    const inBridgeCorridor = x <= 86 && Math.abs(z - -75) <= 2.7;
+  // 1. Cầu Gỗ Săn Mây wooden bridge extending East from (50, -75) to circular deck at (91, -75)
+  if (x >= 50 && x <= 99 && Math.abs(z - -75) <= 7.3) {
+    const inBridgeCorridor = x <= 86.5 && Math.abs(z - -75) <= 2.7;
     const distDeck = Math.hypot(x - 91, z - -75);
-    const inRoundDeck = distDeck <= 7.2;
+    const inRoundDeck = distDeck <= 7.3;
     if (inBridgeCorridor || inRoundDeck) {
-      const t = clamp((x - 52) / 40, 0, 1);
-      const bridgeY = 196.15 + t * 2.1; // Rises gently to 198.25m (~1,648.3m ASL)
+      const t = clamp((x - 50) / 41, 0, 1);
+      const bridgeY = 196.15 + t * 2.1; // Flush 196.15m at x=50, rising gently to 198.25m (~1,648m ASL)
       return Math.max(ground, bridgeY);
     }
   }
 
-  // 2. Tiệm Cà Phê Mơ Sương stilted wooden scenic deck extending East from (-46.. -24, z: 20..40)
-  if (x >= -54 && x <= -23 && z >= 19 && z <= 41) {
+  // 2. Tiệm Cà Phê Mơ Sương stilted wooden scenic deck extending East from (-51..-23, z: 19..41)
+  if (x >= -51.5 && x <= -23 && z >= 19 && z <= 41) {
     return Math.max(ground, 135.15);
   }
 
@@ -200,17 +253,16 @@ export function sampleWalkableHeight(x: number, z: number): number {
 }
 
 export function getSurfaceType(x: number, z: number): SurfaceType {
-  // Wooden decks first
   if (
-    (x >= 50 && x <= 99 && (Math.abs(z - -75) <= 2.7 || Math.hypot(x - 91, z - -75) <= 7.2)) ||
-    (x >= -54 && x <= -23 && z >= 19 && z <= 41)
+    (x >= 50 && x <= 99 && (Math.abs(z - -75) <= 2.7 || Math.hypot(x - 91, z - -75) <= 7.3)) ||
+    (x >= -51.5 && x <= -23 && z >= 19 && z <= 41)
   ) {
     return 'wood_deck';
   }
   const ground = sampleGroundHeight(x, z);
   if (ground < 52) return 'valley_floor';
   if (distanceToTrail(x, z) < 3.1) return 'red_basalt_trail';
-  if (gaussian2D(x, z, -12, -175, 42, 38) > 0.42) return 'pink_grass_meadow';
+  if (gaussian2D(x, z, -14, -175, 42, 38) > 0.42) return 'pink_grass_meadow';
   if (gaussian2D(x, z, 36, -58, 62, 62) > 0.32) return 'tea_terrace';
   return 'pine_grass';
 }

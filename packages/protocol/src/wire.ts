@@ -238,3 +238,4 @@ export function decodeWorldSnapshot(bytes: Uint8Array | ArrayBuffer): DecodedWor
 
   return { serverTick, nearPeers, farPeers };
 }
+

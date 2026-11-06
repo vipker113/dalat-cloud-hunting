@@ -1,0 +1,18 @@
+{
+  "project": "Chạm Mây Đà Lạt – Multiplayer 3D Online World",
+  "licensesVerified": true,
+  "entries": [
+    {
+      "id": "stained_pine",
+      "source": "Poly Haven (https://polyhaven.com/a/stained_pine)",
+      "authors": "Dario Barresi, Jenelle van Heerden",
+      "license": "CC0 1.0 Public Domain"
+    },
+    {
+      "id": "dalat_hero_landmarks",
+      "source": "Custom Procedural & Architectural Modeling via Blender MCP 5.3",
+      "authors": "Da Lat Cloud Hunting 3D Art Team",
+      "license": "First-Party Project Original (100% Owned)"
+    }
+  ]
+}

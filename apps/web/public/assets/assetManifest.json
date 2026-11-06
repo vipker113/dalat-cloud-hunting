@@ -1,0 +1,49 @@
+{
+  "generatedAt": "2026-11-06T11:19:34.147Z",
+  "style": "Warm Highland Painterly PBR",
+  "totalOptimizedKB": 178.2,
+  "assets": [
+    {
+      "file": "cafe_mo_suong.glb",
+      "rawBytes": 76064,
+      "optimizedBytes": 43556,
+      "savingsPct": 42.7,
+      "compression": "EXT_meshopt_compression"
+    },
+    {
+      "file": "cau_go_bridge.glb",
+      "rawBytes": 120240,
+      "optimizedBytes": 56408,
+      "savingsPct": 53.1,
+      "compression": "EXT_meshopt_compression"
+    },
+    {
+      "file": "vintage_cub50.glb",
+      "rawBytes": 45392,
+      "optimizedBytes": 27676,
+      "savingsPct": 39,
+      "compression": "EXT_meshopt_compression"
+    },
+    {
+      "file": "lonely_pine_hero.glb",
+      "rawBytes": 27668,
+      "optimizedBytes": 23912,
+      "savingsPct": 13.6,
+      "compression": "EXT_meshopt_compression"
+    },
+    {
+      "file": "wind_turbine_ge137.glb",
+      "rawBytes": 12648,
+      "optimizedBytes": 11800,
+      "savingsPct": 6.7,
+      "compression": "EXT_meshopt_compression"
+    },
+    {
+      "file": "campfire_stage.glb",
+      "rawBytes": 20648,
+      "optimizedBytes": 19140,
+      "savingsPct": 7.3,
+      "compression": "EXT_meshopt_compression"
+    }
+  ]
+}

@@ -25,3 +25,4 @@ export interface IMultiplayerController {
   /** Called inside useFrame(dt) to smoothly interpolate remote peer transforms at 60 FPS */
   interpolatePeers(nowMs: number): void;
 }
+

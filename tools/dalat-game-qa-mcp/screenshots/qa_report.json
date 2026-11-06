@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-11-06T12:17:40.414Z",
+  "multiplayerSync": {
+    "clientARoom": "MAY-01",
+    "clientBRoom": "MAY-01",
+    "sameInstanceJoinedViaUrl": true,
+    "clientAPeerCount": 6,
+    "clientBPeerCount": 6,
+    "rttMs": 21
+  },
+  "collisionAudit": {
+    "bvhReady": true,
+    "checkedPoints": 143,
+    "holesCount": 0,
+    "maxLandmarkMismatchM": 0.101,
+    "steepestTrailDeg": 23.9,
+    "pass": true
+  },
+  "performanceAudit": {
+    "samples": 71,
+    "fpsAvg": 32.1,
+    "fpsP95": 20,
+    "fpsMin": 20,
+    "frameTimeMsP95": 50.1,
+    "jsHeapMB": 37.6,
+    "connected": true,
+    "roomCode": "MAY-01",
+    "channelName": "Sương Sớm Cầu Đất #1",
+    "rttMs": 21,
+    "peerCount": 6,
+    "farBeaconCount": 0,
+    "qualityTier": "medium",
+    "drawCalls": 132,
+    "triangles": 268228,
+    "geometries": 87,
+    "textures": 5,
+    "estimatedVramMB": 33.4,
+    "gameTime": "05:31 AM",
+    "weather": "golden_cloud_sea"
+  },
+  "consoleErrors": []
+}

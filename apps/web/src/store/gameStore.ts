@@ -347,10 +347,14 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     st.localTransient.vz = 0;
     if (lookAt) {
       const dx = lookAt[0] - position[0];
+      const dy = lookAt[1] - position[1];
       const dz = lookAt[2] - position[2];
+      const horizDist = Math.max(10, Math.hypot(dx, dz));
       const yaw = Math.atan2(dx, dz);
       st.localTransient.yaw = yaw;
       st.localTransient.cameraYaw = Math.atan2(-dx, -dz);
+      const pitchToTarget = -Math.atan2(dy, horizDist);
+      st.localTransient.cameraPitch = Math.max(0.04, Math.min(0.28, pitchToTarget + 0.12));
     }
     set({
       seatedBenchId: null,
@@ -433,3 +437,4 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     })),
   setLastJamNote: (lastJamNote) => set({ lastJamNote }),
 }));
+

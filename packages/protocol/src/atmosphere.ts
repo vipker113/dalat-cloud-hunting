@@ -156,27 +156,27 @@ export function computeWorldAtmosphere(
   const len = Math.hypot(sx, sy, sz) || 1;
   const sunDirection: [number, number, number] = [sx / len, sy / len, sz / len];
 
-  // Keyframe palette interpolation across Da Lat's day
-  let skyZenithHex = '#152238';
-  let skyHorizonHex = '#2D3E63';
-  let cloudLitHex = '#7A8FB8';
-  let cloudShadowHex = '#2A3959';
-  let fogHex = '#263654';
-  let sunLightHex = '#8AA4D6';
-  let sunIntensity = 0.35;
-  let ambientIntensity = 0.42;
+  // Keyframe palette interpolation across Da Lat's day (luminous cobalt twilight at pre-dawn!)
+  let skyZenithHex = '#1F3666';
+  let skyHorizonHex = '#4F6BA3';
+  let cloudLitHex = '#9EB4DE';
+  let cloudShadowHex = '#435882';
+  let fogHex = '#384E7A';
+  let sunLightHex = '#A8C2F0';
+  let sunIntensity = 0.95;
+  let ambientIntensity = 0.88;
   let phaseTitle = 'Sương Đêm & Thung Lũng Đèn';
 
   if (gameHour >= 4.2 && gameHour < 5.15) {
     const t = (gameHour - 4.2) / 0.95;
-    skyZenithHex = lerpHex('#121D33', '#24355C', t);
-    skyHorizonHex = lerpHex('#293859', '#D9796C', t * t);
-    cloudLitHex = lerpHex('#5B7099', '#F2A488', t);
-    cloudShadowHex = lerpHex('#222F4D', '#4A5D85', t);
-    fogHex = lerpHex('#1E2B47', '#5E688A', t);
-    sunLightHex = lerpHex('#6F89BA', '#FF9973', t);
-    sunIntensity = lerp(0.28, 1.35, t);
-    ambientIntensity = lerp(0.38, 0.58, t);
+    skyZenithHex = lerpHex('#16264C', '#2E4678', t);
+    skyHorizonHex = lerpHex('#3E568C', '#F08A78', t * t);
+    cloudLitHex = lerpHex('#586F9E', '#F7B094', t * t);
+    cloudShadowHex = lerpHex('#273659', '#5B6F99', t);
+    fogHex = lerpHex('#2E426B', '#70789E', t);
+    sunLightHex = lerpHex('#8FAEE0', '#FFA882', t);
+    sunIntensity = lerp(0.82, 1.68, t);
+    ambientIntensity = lerp(0.76, 0.95, t);
     phaseTitle = t < 0.55 ? 'Chạng Vạng Thung Lũng Đèn' : 'Chân Trời Hửng Hồng';
   } else if (gameHour >= 5.15 && gameHour < 6.6) {
     const t = (gameHour - 5.15) / 1.45;
@@ -214,9 +214,9 @@ export function computeWorldAtmosphere(
   }
 
   // Weather modulations
-  let cloudBottomY = 34;
-  let cloudTopY = 108; // ~1,558m ASL inversion lid!
-  let cloudDensity = 0.88;
+  let cloudBottomY = 30;
+  let cloudTopY = gameHour < 4.88 ? lerp(74, 108, clamp01((gameHour - 4.65) / 0.23)) : 108; // ~1,558m ASL inversion lid!
+  let cloudDensity = gameHour < 4.92 || gameHour > 18.5 ? 0.56 : 0.88;
   let windStrength = 0.55;
   let drizzleIntensity = 0;
 
@@ -291,3 +291,4 @@ function smoothstepLocal(e0: number, e1: number, x: number): number {
   const t = clamp01((x - e0) / (e1 - e0));
   return t * t * (3 - 2 * t);
 }
+

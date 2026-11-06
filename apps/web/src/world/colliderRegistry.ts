@@ -21,3 +21,4 @@ export const worldColliderRegistry = {
     return activeCollider;
   },
 };
+
