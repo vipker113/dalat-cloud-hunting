@@ -378,6 +378,23 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
 
   enterWorld: () =>
     set((s) => {
+      // Prevent spawning directly on top of another player on the veranda deck
+      for (let attempt = 0; attempt < 8; attempt++) {
+        let tooClose = false;
+        for (const peerId in s.peers) {
+          const peer = s.peers[peerId];
+          if (peer && Math.hypot(peer.x - s.localTransient.x, peer.z - s.localTransient.z) < 1.15) {
+            tooClose = true;
+            break;
+          }
+        }
+        if (!tooClose) break;
+        const offsetAngle = (attempt + 1) * 1.25;
+        s.localTransient.x = -30.0 + Math.cos(offsetAngle) * (1.25 + attempt * 0.3);
+        s.localTransient.z = 32.0 + Math.sin(offsetAngle) * (1.45 + attempt * 0.35);
+        s.localTransient.y = sampleWalkableHeight(s.localTransient.x, s.localTransient.z);
+      }
+
       // Face East toward the Volumetric Cloud Sea & Sunrise upon stepping into the world!
       s.localTransient.yaw = 1.48;
       s.localTransient.cameraYaw = -1.66;

@@ -3,6 +3,7 @@ import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
 import {
   PlayerOutfit,
+  resolveBenchSeatTransform,
   sampleWalkableHeight,
   SHARED_BENCHES,
   WORLD_CONSTANTS,
@@ -163,12 +164,12 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     let targetYaw = peer.yaw;
 
     if (peer.seatId) {
-      const bench = SHARED_BENCHES.find((b) => b.id === peer.seatId);
-      if (bench) {
-        targetX = bench.position[0];
-        targetY = bench.position[1];
-        targetZ = bench.position[2];
-        targetYaw = bench.yaw;
+      const seatTransform = resolveBenchSeatTransform(peer.seatId);
+      if (seatTransform) {
+        targetX = seatTransform.position[0];
+        targetY = seatTransform.position[1];
+        targetZ = seatTransform.position[2];
+        targetYaw = seatTransform.yaw;
       }
     } else if (peer.grounded) {
       // Cache BVH floor height so stationary or distant bots don't trigger 96 BVH raycasts per frame!

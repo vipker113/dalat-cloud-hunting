@@ -25,8 +25,10 @@ import {
   type NearPeerTransform,
   NECKWEAR_CATALOG,
   type NeckwearId,
+  parseBenchSeatId,
   type PlayerOutfit,
   type PolaroidEntry,
+  resolveBenchSeatTransform,
   resolveEffectiveBagStyle,
   resolveEffectiveEyewear,
   resolveEffectiveGender,
@@ -459,7 +461,7 @@ export class CloudHuntingRoom extends Room<{
       }
     );
 
-    // 7. Atomic shared bench seating
+    // 7. Atomic shared bench seating (supports 2 side-by-side seats per bench: `:0` and `:1`)
     this.onMessage('seat_req', (client, payload: { benchId?: string | null }) => {
       const ent = this.humanEntities.get(client.sessionId);
       const ps = this.state.players.get(client.sessionId);
@@ -473,35 +475,53 @@ export class CloudHuntingRoom extends Room<{
         return;
       }
 
-      const bench = BENCH_BY_ID.get(requestedId);
+      const { benchId: baseBenchId } = parseBenchSeatId(requestedId);
+      const bench = BENCH_BY_ID.get(baseBenchId);
       if (!bench) {
         client.send('seat_ack', { benchId: null, ok: false });
         return;
       }
 
-      const currentOccupant = this.state.occupiedBenches.get(bench.id);
-      if (currentOccupant && currentOccupant !== client.sessionId) {
+      const slot0Id = `${bench.id}:0`;
+      const slot1Id = `${bench.id}:1`;
+      const occ0 = this.state.occupiedBenches.get(slot0Id) || this.state.occupiedBenches.get(bench.id);
+      const occ1 = this.state.occupiedBenches.get(slot1Id);
+
+      let chosenSeatId: string | null = null;
+      if (!occ0 || occ0 === client.sessionId) {
+        chosenSeatId = slot0Id;
+      } else if (!occ1 || occ1 === client.sessionId) {
+        chosenSeatId = slot1Id;
+      }
+
+      if (!chosenSeatId) {
         client.send('seat_ack', {
           benchId: null,
           ok: false,
-          reason: 'Ghế gỗ này đang có lữ khách ngồi ngắm mây rồi!',
+          reason: 'Ghế đôi này đã có đủ 2 lữ khách đang ngồi ngắm mây!',
         });
         return;
       }
 
+      const seatTransform = resolveBenchSeatTransform(chosenSeatId);
+      if (!seatTransform) {
+        client.send('seat_ack', { benchId: null, ok: false });
+        return;
+      }
+
       // Release any previous seat held by this client first
-      if (ps.seatId && ps.seatId !== bench.id) {
+      if (ps.seatId && ps.seatId !== chosenSeatId) {
         this.releaseClientBench(client.sessionId);
       }
 
-      this.state.occupiedBenches.set(bench.id, client.sessionId);
-      ps.seatId = bench.id;
+      this.state.occupiedBenches.set(chosenSeatId, client.sessionId);
+      ps.seatId = chosenSeatId;
       ps.emote = 'sit_chill';
 
-      ent.x = bench.position[0];
-      ent.y = bench.position[1];
-      ent.z = bench.position[2];
-      ent.yaw = bench.yaw;
+      ent.x = seatTransform.position[0];
+      ent.y = seatTransform.position[1];
+      ent.z = seatTransform.position[2];
+      ent.yaw = seatTransform.yaw;
       ent.vx = 0;
       ent.vz = 0;
       ent.moving = false;
@@ -514,10 +534,10 @@ export class CloudHuntingRoom extends Room<{
       ps.spawnYaw = ent.yaw;
 
       client.send('seat_ack', {
-        benchId: bench.id,
+        benchId: chosenSeatId,
         ok: true,
-        position: bench.position,
-        yaw: bench.yaw,
+        position: seatTransform.position,
+        yaw: seatTransform.yaw,
       });
     });
 
@@ -737,8 +757,12 @@ export class CloudHuntingRoom extends Room<{
     // 5. Auto-release bench seat if player walks away
     const ps = this.state.players.get(client.sessionId);
     if (ps && ps.seatId) {
-      const bench = BENCH_BY_ID.get(ps.seatId);
-      if (!bench || (pkt.moving && Math.hypot(nx - bench.position[0], nz - bench.position[2]) > 0.85)) {
+      const seatTransform = resolveBenchSeatTransform(ps.seatId);
+      if (
+        !seatTransform ||
+        (pkt.moving &&
+          Math.hypot(nx - seatTransform.position[0], nz - seatTransform.position[2]) > 0.85)
+      ) {
         this.releaseClientBench(client.sessionId);
       }
     }
@@ -759,14 +783,29 @@ export class CloudHuntingRoom extends Room<{
     // Slight ring jitter around Mơ Sương courtyard so simultaneous joiners never stack identically
     const angle = (numericId * 2.39996) % (Math.PI * 2);
     const radius = 2.2 + (numericId % 4) * 0.85;
-    const rawX =
+    let rawX =
       typeof options?.x === 'number' && Number.isFinite(options.x)
         ? clamp(options.x, -445, 445)
         : defaultSpawn[0] - 4 + Math.cos(angle) * radius;
-    const rawZ =
+    let rawZ =
       typeof options?.z === 'number' && Number.isFinite(options.z)
         ? clamp(options.z, -445, 445)
         : defaultSpawn[2] + 3 + Math.sin(angle) * radius;
+
+    // Prevent spawning directly on top of another player (0.0m overlap)
+    for (let attempt = 0; attempt < 8; attempt++) {
+      let tooClose = false;
+      for (const other of this.humanEntities.values()) {
+        if (Math.hypot(other.x - rawX, other.z - rawZ) < 1.15) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (!tooClose) break;
+      const offsetAngle = angle + attempt * 1.15;
+      rawX = -30.2 + Math.cos(offsetAngle) * (1.35 + attempt * 0.35);
+      rawZ = 31.8 + Math.sin(offsetAngle) * (1.55 + attempt * 0.45);
+    }
     const spawnY = sampleWalkableHeight(rawX, rawZ);
 
     const outfit = sanitizeOutfit(options?.outfit);

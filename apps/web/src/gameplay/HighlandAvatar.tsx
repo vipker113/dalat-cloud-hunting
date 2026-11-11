@@ -1031,7 +1031,7 @@ export function HighlandAvatar({
             receiveShadow
           />
         )}
-        {customNeckwearGeo && (
+        {customNeckwearGeo && !(effNeckwear === 'camera_strap' && heldItem === 'film_camera') && (
           <mesh
             geometry={customNeckwearGeo}
             material={SHARED_VCOLOR_MAT}

@@ -131,3 +131,41 @@ export const SHARED_BENCHES: BenchSpot[] = [
     yaw: Math.PI,
   },
 ];
+
+export const BENCH_SEAT_LATERAL_OFFSET = 0.34;
+
+export function parseBenchSeatId(rawSeatOrBenchId: string): {
+  benchId: string;
+  slotIndex: 0 | 1;
+} {
+  const cleaned = (rawSeatOrBenchId || '').trim();
+  if (cleaned.endsWith(':1')) {
+    return { benchId: cleaned.slice(0, -2), slotIndex: 1 };
+  }
+  if (cleaned.endsWith(':0')) {
+    return { benchId: cleaned.slice(0, -2), slotIndex: 0 };
+  }
+  return { benchId: cleaned, slotIndex: 0 };
+}
+
+export function resolveBenchSeatTransform(rawSeatOrBenchId: string): {
+  bench: BenchSpot;
+  seatId: string;
+  slotIndex: 0 | 1;
+  position: [number, number, number];
+  yaw: number;
+} | null {
+  const { benchId, slotIndex } = parseBenchSeatId(rawSeatOrBenchId);
+  const bench = SHARED_BENCHES.find((b) => b.id === benchId);
+  if (!bench) return null;
+  const lateral = (slotIndex === 0 ? -1 : 1) * BENCH_SEAT_LATERAL_OFFSET;
+  const x = bench.position[0] + Math.cos(bench.yaw) * lateral;
+  const z = bench.position[2] - Math.sin(bench.yaw) * lateral;
+  return {
+    bench,
+    seatId: `${bench.id}:${slotIndex}`,
+    slotIndex,
+    position: [x, bench.position[1], z],
+    yaw: bench.yaw,
+  };
+}

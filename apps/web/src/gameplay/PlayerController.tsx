@@ -4,6 +4,7 @@ import { useFrame, useThree } from '@react-three/fiber';
 import {
   getSurfaceType,
   LANDMARK_LIST,
+  resolveBenchSeatTransform,
   sampleGroundHeight,
   sampleWalkableHeight,
   SHARED_BENCHES,
@@ -828,10 +829,10 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     } else {
       // Auto-stand up from bench if player moves or jumps (step slightly forward clear of bench box)
       if (st.seatedBenchId && (inputMag > 0.15 || lt.jumpRequested)) {
-        const bench = SHARED_BENCHES.find((b) => b.id === st.seatedBenchId);
-        if (bench) {
-          lt.x = bench.position[0] + Math.sin(bench.yaw) * 0.74;
-          lt.z = bench.position[2] + Math.cos(bench.yaw) * 0.74;
+        const seatTransform = resolveBenchSeatTransform(st.seatedBenchId);
+        if (seatTransform) {
+          lt.x = seatTransform.position[0] + Math.sin(seatTransform.yaw) * 0.78;
+          lt.z = seatTransform.position[2] + Math.cos(seatTransform.yaw) * 0.78;
         }
         st.setSeatedBench(null);
         net.requestBenchSeat(null);
@@ -1077,6 +1078,29 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
               if (bvhFloorY === null || _hitWorld.y > bvhFloorY) {
                 bvhFloorY = _hitWorld.y;
               }
+            }
+          }
+        }
+
+        // 5c. Personal-space soft separation against remote human peers so players never stack at 0.0m
+        const peers = st.peers;
+        for (const peerId in peers) {
+          const peer = peers[peerId];
+          if (!peer) continue;
+          if (Math.abs(peer.y - lt.y) > 1.8) continue;
+          const pdx = lt.x - peer.x;
+          const pdz = lt.z - peer.z;
+          const pdist = Math.hypot(pdx, pdz);
+          const minSep = 0.72;
+          if (pdist < minSep) {
+            if (pdist > 0.001) {
+              const push = (minSep - pdist) * Math.min(1, dt * 16);
+              lt.x += (pdx / pdist) * push;
+              lt.z += (pdz / pdist) * push;
+            } else {
+              const fallbackAngle = ((peer.numericId || 1) * 2.39996) % (Math.PI * 2);
+              lt.x += Math.cos(fallbackAngle) * 0.72;
+              lt.z += Math.sin(fallbackAngle) * 0.72;
             }
           }
         }

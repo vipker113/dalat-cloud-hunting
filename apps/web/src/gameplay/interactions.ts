@@ -1,4 +1,9 @@
-import { isWarmEdibleOrDrinkProp, SHARED_BENCHES, sampleWalkableHeight } from '@dalat/protocol';
+import {
+  isWarmEdibleOrDrinkProp,
+  resolveBenchSeatTransform,
+  sampleWalkableHeight,
+  SHARED_BENCHES,
+} from '@dalat/protocol';
 import type { IMultiplayerController } from '../network/types';
 import { InteractPrompt, NearbyPeerInfo, useGameStore } from '../store/gameStore';
 
@@ -32,26 +37,29 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
 
   // If currently seated on a bench, allow standing up cleanly with [E]
   if (st.seatedBenchId) {
-    const bench = SHARED_BENCHES.find((b) => b.id === st.seatedBenchId);
+    const seatTransform = resolveBenchSeatTransform(st.seatedBenchId);
+    const bench = seatTransform?.bench;
     return {
       id: `stand-${st.seatedBenchId}`,
       label: 'Đứng dậy dạo bước săn mây',
       sublabel: bench ? bench.label : 'Rời ghế gỗ',
       actionType: 'sit_bench',
       benchId: undefined,
-      position: bench ? bench.position : [px, sampleWalkableHeight(px, pz), pz],
+      position: seatTransform ? seatTransform.position : [px, sampleWalkableHeight(px, pz), pz],
     };
   }
 
   let bestPrompt: InteractPrompt | null = null;
   let bestScore = Infinity;
 
-  // 1. Unoccupied Shared Benches (< 2.8m)
+  // 1. Shared 2-Seater Benches (< 2.8m)
   for (let i = 0; i < SHARED_BENCHES.length; i++) {
     const bench = SHARED_BENCHES[i];
-    const occupiedBy = st.occupiedBenches[bench.id];
-    const isUnoccupied = !occupiedBy || occupiedBy === st.localSessionId;
-    if (!isUnoccupied) continue;
+    const occ0 = st.occupiedBenches[`${bench.id}:0`] || st.occupiedBenches[bench.id];
+    const occ1 = st.occupiedBenches[`${bench.id}:1`];
+    const slot0Free = !occ0 || occ0 === st.localSessionId;
+    const slot1Free = !occ1 || occ1 === st.localSessionId;
+    if (!slot0Free && !slot1Free) continue;
     const d = dist2D(px, pz, bench.position[0], bench.position[2]);
     if (d < 2.8 && d < bestScore) {
       bestScore = d;
@@ -60,7 +68,7 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
         label: 'Ngồi ngắm mây cùng nhau',
         sublabel: bench.label,
         actionType: 'sit_bench',
-        benchId: bench.id,
+        benchId: slot0Free ? `${bench.id}:0` : `${bench.id}:1`,
         position: bench.position,
       };
     }
@@ -342,28 +350,34 @@ export function executeInteractPrompt(prompt: InteractPrompt, net: IMultiplayerC
     }
     case 'sit_bench': {
       if (st.seatedBenchId || !prompt.benchId) {
-        // Stand up smoothly
+        // Stand up smoothly and step clear in front of the bench
+        const curSeat = st.seatedBenchId ? resolveBenchSeatTransform(st.seatedBenchId) : null;
+        if (curSeat) {
+          st.localTransient.x = curSeat.position[0] + Math.sin(curSeat.yaw) * 0.78;
+          st.localTransient.z = curSeat.position[2] + Math.cos(curSeat.yaw) * 0.78;
+          st.localTransient.y = sampleWalkableHeight(st.localTransient.x, st.localTransient.z);
+        }
         st.setSeatedBench(null);
         net.requestBenchSeat(null);
         st.triggerEmote('none');
         net.sendEmote('none');
         return;
       }
-      const bench = SHARED_BENCHES.find((b) => b.id === prompt.benchId);
-      if (bench) {
-        // Snap local player gently onto the wooden bench facing the scenic horizon
-        st.localTransient.x = bench.position[0];
-        st.localTransient.y = bench.position[1];
-        st.localTransient.z = bench.position[2];
+      const seatTransform = resolveBenchSeatTransform(prompt.benchId);
+      if (seatTransform) {
+        // Snap local player gently onto the assigned side-by-side seat slot facing the scenic horizon
+        st.localTransient.x = seatTransform.position[0];
+        st.localTransient.y = seatTransform.position[1];
+        st.localTransient.z = seatTransform.position[2];
         st.localTransient.vx = 0;
         st.localTransient.vy = 0;
         st.localTransient.vz = 0;
         st.localTransient.moving = false;
         st.localTransient.running = false;
-        st.localTransient.yaw = bench.yaw;
-        st.setSeatedBench(bench.id);
-        net.requestBenchSeat(bench.id);
-        st.showToast(`🪑 Đang ngồi tại ${bench.label} — Bấm WASD hoặc [E] để đứng dậy`);
+        st.localTransient.yaw = seatTransform.yaw;
+        st.setSeatedBench(seatTransform.seatId);
+        net.requestBenchSeat(seatTransform.seatId);
+        st.showToast(`🪑 Đang ngồi tại ${seatTransform.bench.label} — Bấm WASD hoặc [E] để đứng dậy`);
       }
       break;
     }

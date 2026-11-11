@@ -19,6 +19,7 @@ import {
   type NeckwearId,
   type PlayerOutfit,
   type PolaroidEntry,
+  resolveBenchSeatTransform,
   resolveEffectiveGender,
   sampleWalkableHeight,
   SHARED_BENCHES,
@@ -623,15 +624,15 @@ class MultiplayerClientController implements IMultiplayerController {
       st.setSeatedBench(null);
       return;
     }
-    const bench = SHARED_BENCHES.find((b) => b.id === benchId);
-    if (bench) {
-      st.localTransient.x = bench.position[0];
-      st.localTransient.y = bench.position[1];
-      st.localTransient.z = bench.position[2];
-      st.localTransient.yaw = bench.yaw;
+    const seatTransform = resolveBenchSeatTransform(benchId);
+    if (seatTransform) {
+      st.localTransient.x = seatTransform.position[0];
+      st.localTransient.y = seatTransform.position[1];
+      st.localTransient.z = seatTransform.position[2];
+      st.localTransient.yaw = seatTransform.yaw;
       st.localTransient.vx = 0;
       st.localTransient.vz = 0;
-      st.setSeatedBench(bench.id);
+      st.setSeatedBench(seatTransform.seatId);
     }
   }
 
@@ -715,12 +716,12 @@ class MultiplayerClientController implements IMultiplayerController {
       if (!peer) continue;
 
       if (peer.seatId) {
-        const bench = SHARED_BENCHES.find((b) => b.id === peer.seatId);
-        if (bench) {
-          peer.x = bench.position[0];
-          peer.y = bench.position[1];
-          peer.z = bench.position[2];
-          peer.yaw = bench.yaw;
+        const seatTransform = resolveBenchSeatTransform(peer.seatId);
+        if (seatTransform) {
+          peer.x = seatTransform.position[0];
+          peer.y = seatTransform.position[1];
+          peer.z = seatTransform.position[2];
+          peer.yaw = seatTransform.yaw;
         }
         peer.vx = 0;
         peer.vz = 0;
@@ -1078,8 +1079,17 @@ class MultiplayerClientController implements IMultiplayerController {
             st.localTransient.vz = 0;
           }
           st.setSeatedBench(ack.benchId ?? null);
-        } else if (ack?.reason) {
-          st.showToast(ack.reason);
+        } else {
+          const prevSeat = st.seatedBenchId ? resolveBenchSeatTransform(st.seatedBenchId) : null;
+          if (prevSeat) {
+            st.localTransient.x = prevSeat.position[0] + Math.sin(prevSeat.yaw) * 0.85;
+            st.localTransient.z = prevSeat.position[2] + Math.cos(prevSeat.yaw) * 0.85;
+            st.localTransient.y = sampleWalkableHeight(st.localTransient.x, st.localTransient.z);
+          }
+          st.setSeatedBench(null);
+          if (ack?.reason) {
+            st.showToast(ack.reason);
+          }
         }
       }
     );
