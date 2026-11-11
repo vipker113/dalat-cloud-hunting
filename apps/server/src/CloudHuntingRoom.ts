@@ -35,7 +35,6 @@ import {
   SHARED_BENCHES,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
-import { AmbientHikerController, type AmbientHikerRuntime } from './ambientHikers';
 import { sanitizeSocialText, worldPersistence } from './persistence';
 import { CloudRoomState, PlayerSchema, type CloudRoomMetadata } from './schema';
 
@@ -236,7 +235,6 @@ export class CloudHuntingRoom extends Room<{
   public channelName = 'Sương Sớm Cầu Đất #1';
 
   private readonly humanEntities = new Map<string, HumanEntityTransform>();
-  private ambientHikers!: AmbientHikerController;
 
   private allocateNumericId(): number {
     // Wrap safely in 1..65534
@@ -248,14 +246,6 @@ export class CloudHuntingRoom extends Room<{
         if (h.numericId === candidate) {
           collision = true;
           break;
-        }
-      }
-      if (!collision && this.ambientHikers) {
-        for (const b of this.ambientHikers.getAll()) {
-          if (b.numericId === candidate) {
-            collision = true;
-            break;
-          }
         }
       }
       if (!collision) return candidate;
@@ -291,46 +281,12 @@ export class CloudHuntingRoom extends Room<{
       },
     });
 
-    // Spawn 5 autonomous server-driven Da Lat cloud-hunters
-    this.ambientHikers = new AmbientHikerController(() => this.allocateNumericId());
-    for (const bot of this.ambientHikers.getAll()) {
-      if (bot.active) {
-        this.upsertBotSchema(bot);
-      }
-    }
-
     this.registerMessageHandlers();
 
     const tickIntervalMs = 1000 / WORLD_CONSTANTS.NET_TICK_HZ; // 83.333ms (12 Hz)
     this.setTimestep((dtMs) => this.tickSimulation(dtMs), tickIntervalMs);
 
     activeCloudRooms.set(this.roomId, this);
-  }
-
-  private upsertBotSchema(bot: AmbientHikerRuntime): void {
-    const ps = new PlayerSchema();
-    ps.numericId = bot.numericId;
-    ps.sessionId = bot.spec.sessionId;
-    ps.displayName = bot.spec.displayName;
-    ps.gender = getCoatGender(bot.spec.coatStyle);
-    ps.coatStyle = bot.spec.coatStyle;
-    ps.coatColor = bot.spec.coatColor;
-    ps.scarfColor = bot.spec.scarfColor;
-    ps.headwear = bot.spec.headwear;
-    ps.neckwear = bot.spec.neckwear;
-    ps.eyewear = bot.spec.eyewear;
-    ps.bagStyle = bot.spec.bagStyle;
-    ps.hairColor = bot.spec.hairColor;
-    ps.backpack = bot.spec.backpack;
-    ps.heldItem = bot.heldItem;
-    ps.emote = bot.emote;
-    ps.seatId = '';
-    ps.isBot = true;
-    ps.spawnX = bot.x;
-    ps.spawnY = bot.y;
-    ps.spawnZ = bot.z;
-    ps.spawnYaw = bot.yaw;
-    this.state.players.set(bot.spec.sessionId, ps);
   }
 
   private registerMessageHandlers(): void {
@@ -466,68 +422,17 @@ export class CloudHuntingRoom extends Room<{
         }
         ent.lastSocialAtMs = now;
 
-        // Check if target is a human peer or an autonomous ambient hiker within 10m
+        // Check if target is a human peer within 10m
         const targetHuman = this.humanEntities.get(targetId);
-        let midX = ent.x;
-        let midY = ent.y + 1.45;
-        let midZ = ent.z;
+        if (!targetHuman) return;
+        if (Math.hypot(targetHuman.x - ent.x, targetHuman.z - ent.z) > 10.5) return;
 
-        if (targetHuman) {
-          if (Math.hypot(targetHuman.x - ent.x, targetHuman.z - ent.z) > 10.5) return;
-          midX = (ent.x + targetHuman.x) * 0.5;
-          midY = (ent.y + targetHuman.y) * 0.5 + 1.48;
-          midZ = (ent.z + targetHuman.z) * 0.5;
-          if (kind === 'cheers') {
-            ent.warmBuff = true;
-            targetHuman.warmBuff = true;
-          }
-        } else {
-          const botReaction = this.ambientHikers.reactToSocial(
-            targetId,
-            ent.x,
-            ent.z,
-            ps.displayName,
-            kind
-          );
-          if (!botReaction) return;
-          const { bot, emote, heldItem, replyText } = botReaction;
-          if (Math.hypot(bot.x - ent.x, bot.z - ent.z) > 10.5) return;
-          midX = (ent.x + bot.x) * 0.5;
-          midY = (ent.y + bot.y) * 0.5 + 1.48;
-          midZ = (ent.z + bot.z) * 0.5;
-          if (kind === 'cheers') {
-            ent.warmBuff = true;
-          }
-
-          const botSchema = this.state.players.get(bot.spec.sessionId);
-          if (botSchema) {
-            botSchema.emote = emote;
-            botSchema.heldItem = heldItem;
-          }
-
-          // Broadcast warm Đà Lạt reply bubble from the ambient hiker within proximity
-          const botBubble: ChatBubbleMessage = {
-            id: `bot-msg-${now}-${Math.random().toString(36).slice(2, 6)}`,
-            senderId: bot.spec.sessionId,
-            senderName: bot.spec.displayName,
-            text: replyText,
-            x: bot.x,
-            y: bot.y,
-            z: bot.z,
-            timestamp: now,
-          };
-          for (let i = 0; i < this.clients.length; i++) {
-            const c = this.clients[i];
-            const other = this.humanEntities.get(c.sessionId);
-            if (
-              c.sessionId === client.sessionId ||
-              (other &&
-                Math.hypot(other.x - bot.x, other.z - bot.z) <=
-                  WORLD_CONSTANTS.PROXIMITY_CHAT_RADIUS)
-            ) {
-              c.send('chat_bubble', botBubble);
-            }
-          }
+        const midX = (ent.x + targetHuman.x) * 0.5;
+        const midY = (ent.y + targetHuman.y) * 0.5 + 1.48;
+        const midZ = (ent.z + targetHuman.z) * 0.5;
+        if (kind === 'cheers') {
+          ent.warmBuff = true;
+          targetHuman.warmBuff = true;
         }
 
         // Broadcast 3D social sparkle & toast event to nearby clients
@@ -923,7 +828,6 @@ export class CloudHuntingRoom extends Room<{
       likedPolaroids: new Set<string>(),
     });
 
-    this.syncAmbientBotPopulation();
     setTimeout(() => {
       if (this.humanEntities.has(client.sessionId)) {
         this.sendWorldHydration(client, numericId);
@@ -967,7 +871,6 @@ export class CloudHuntingRoom extends Room<{
     this.releaseClientBench(client.sessionId);
     this.humanEntities.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
-    this.syncAmbientBotPopulation();
   }
 
   onDispose(): void {
@@ -976,40 +879,14 @@ export class CloudHuntingRoom extends Room<{
     worldPersistence.flushToDiskNow();
   }
 
-  private syncAmbientBotPopulation(): void {
-    const { added, removed } = this.ambientHikers.reconcilePopulation(this.clients.length);
-    for (const bot of added) {
-      this.upsertBotSchema(bot);
-    }
-    for (const bot of removed) {
-      this.state.players.delete(bot.spec.sessionId);
-    }
-  }
-
-  private tickSimulation(dtMs: number): void {
+  private tickSimulation(_dtMs: number): void {
     this.serverTick = (this.serverTick + 1) & 0xffff;
-    const dtSec = clamp(dtMs / 1000, 0.01, 0.25);
-
-    // Step autonomous ambient cloud-hunters
-    const emoteChanges = this.ambientHikers.step(dtSec);
-    for (let i = 0; i < emoteChanges.length; i++) {
-      const change = emoteChanges[i];
-      const botSchema = this.state.players.get(change.sessionId);
-      if (botSchema) {
-        if (botSchema.emote !== change.emote) {
-          botSchema.emote = change.emote;
-        }
-        if (botSchema.heldItem !== change.heldItem) {
-          botSchema.heldItem = change.heldItem;
-        }
-      }
-    }
 
     if (this.clients.length === 0) {
       return;
     }
 
-    // Collect all active peer transforms (humans + active bots)
+    // Collect all active human peer transforms
     const allEntities: NearPeerTransform[] = [];
     for (const h of this.humanEntities.values()) {
       allEntities.push({
@@ -1025,11 +902,6 @@ export class CloudHuntingRoom extends Room<{
         grounded: h.grounded,
         warmBuff: h.warmBuff,
       });
-    }
-    for (const bot of this.ambientHikers.getAll()) {
-      if (bot.active) {
-        allEntities.push(this.ambientHikers.toNearTransform(bot));
-      }
     }
 
     // Standard Cozy Shard (<= 40 entities): single zero-copy broadcast frame to all clients

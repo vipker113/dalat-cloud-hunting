@@ -1152,7 +1152,7 @@ class MultiplayerClientController implements IMultiplayerController {
     player: ReflectedPlayer,
     sessionId: string
   ): void {
-    if (!player) return;
+    if (!player || player.isBot) return;
     if (sessionId === room.sessionId) {
       this.localNumericId = player.numericId;
       return;
