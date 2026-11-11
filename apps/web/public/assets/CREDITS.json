@@ -1,18 +1,27 @@
 {
-  "project": "Chạm Mây Đà Lạt – Multiplayer 3D Online World",
-  "licensesVerified": true,
-  "entries": [
+  "licenseSummary": "All 3D models, animations, and PBR textures in this directory are licensed under CC0 1.0 Universal (Public Domain Dedication) or authored procedurally in Blender for Chạm Mây Đà Lạt.",
+  "sources": [
     {
-      "id": "stained_pine",
-      "source": "Poly Haven (https://polyhaven.com/a/stained_pine)",
-      "authors": "Dario Barresi, Jenelle van Heerden",
-      "license": "CC0 1.0 Public Domain"
+      "provider": "Poly Haven",
+      "license": "CC0 1.0 Universal",
+      "url": "https://polyhaven.com/models",
+      "assets": [
+        { "id": "painted_wooden_bench", "exportedAs": "ph_wooden_bench.glb", "usage": "Shared highland timber benches across Tiệm Cà Phê Mơ Sương, Cầu Gỗ Săn Mây, and viewpoints" },
+        { "id": "stone_fire_pit", "exportedAs": "campfire_stage.glb", "usage": "Acoustic campfire stone ring at Tiệm Cà Phê Mơ Sương" },
+        { "id": "fern_02", "exportedAs": "ph_botanicals.glb (PH_Fern)", "usage": "Highland forest floor botanical ferns along red-basalt trails" },
+        { "id": "shrub_sorrel_01", "exportedAs": "ph_botanicals.glb (PH_Shrub)", "usage": "Highland groundcover botanicals" }
+      ]
     },
     {
-      "id": "dalat_hero_landmarks",
-      "source": "Custom Procedural & Architectural Modeling via Blender MCP 5.3",
-      "authors": "Da Lat Cloud Hunting 3D Art Team",
-      "license": "First-Party Project Original (100% Owned)"
+      "provider": "Quaternius (Tomás Lujan)",
+      "license": "CC0 1.0 Universal",
+      "url": "https://quaternius.com",
+      "assets": [
+        { "id": "Modular Men & Modular Women (Adventurer, Casual, Casual2)", "exportedAs": "hiker_f_adventurer.glb, hiker_f_casual.glb, hiker_m_jacket.glb, hiker_m_sweater.glb", "usage": "Rigged multiplayer hiker characters customized with Đà Lạt winter scarves, beanies, berets, and backpacks" },
+        { "id": "Universal Animation Library 1 & 2 (Standard)", "exportedAs": "hiker_animations.glb", "usage": "Skeletal humanoid locomotion and cozy social emote clips (Idle, Walk, Run, Sprint, Jump, Sit, Wave, HoldProp, WarmHands, SipDrink, Cheer)" },
+        { "id": "Ultimate Nature Pack (PineTree_1, PineTree_3, Rock_Moss_1, WoodLog_Moss)", "exportedAs": "highland_pines.glb, lonely_pine_hero.glb, highland_rocks_and_clouds.glb", "usage": "Đà Lạt Pinus kesiya pine forest, Cây Thông Cô Đơn Thiên Phúc Đức, mossy boulders, and fallen mushroom logs" },
+        { "id": "Platformer Pack (Cloud1, Cloud2, Cloud_1)", "exportedAs": "highland_rocks_and_clouds.glb (CumulusClusterA/B/C)", "usage": "Instanced 3D volumetric cumulus cloud puff clusters across Đồi Cầu Đất valley" }
+      ]
     }
   ]
 }

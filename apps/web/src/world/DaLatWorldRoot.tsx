@@ -2,10 +2,12 @@ import { useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { CloudSeaSystem } from '../environment/CloudSeaSystem';
 import { SkyAndLighting } from '../environment/SkyAndLighting';
-import { SoundscapeController } from '../audio/SoundscapeController';
+import { CinematicPostProcessing } from '../environment/CinematicPostProcessing';
+import { HighlandAtmosphereParticles } from '../environment/HighlandAtmosphereParticles';
 import { useGameStore } from '../store/gameStore';
 import { DaLatWorldTerrain } from './DaLatWorldTerrain';
 import { HighlandFoliageAndProps } from './HighlandFoliageAndProps';
+import { HighlandMeadowGrass } from './HighlandMeadowGrass';
 import { HeroLandmarks } from './HeroLandmarks';
 
 function AdaptiveQualityAndAtmosphereGovernor() {
@@ -103,12 +105,14 @@ export function DaLatWorldRoot() {
   return (
     <group name="DaLatWorldRoot">
       <AdaptiveQualityAndAtmosphereGovernor />
-      <SoundscapeController />
       <SkyAndLighting />
       <DaLatWorldTerrain />
+      <HighlandMeadowGrass />
       <HighlandFoliageAndProps />
       <HeroLandmarks />
+      <HighlandAtmosphereParticles />
       <CloudSeaSystem />
+      <CinematicPostProcessing />
     </group>
   );
 }

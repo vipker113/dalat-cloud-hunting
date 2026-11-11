@@ -1,6 +1,7 @@
 import { useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { useGameStore } from '../store/gameStore';
+import { renderSceneWithPostProcessing } from '../environment';
 import { captureAndComposePolaroid } from './polaroidComposer';
 
 /**
@@ -16,8 +17,8 @@ export function PhotoCaptureBridge() {
     if (st.photoShutterNonce === lastNonceRef.current) return;
     lastNonceRef.current = st.photoShutterNonce;
 
-    // Force an explicit synchronous render pass right before reading gl.domElement
-    gl.render(scene, camera);
+    // Force an explicit synchronous full post-processed render pass right before reading gl.domElement
+    renderSceneWithPostProcessing(gl, scene, camera);
 
     const entry = captureAndComposePolaroid({
       sourceCanvas: gl.domElement,

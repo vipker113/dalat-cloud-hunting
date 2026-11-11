@@ -1,8 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
-import { PlayerOutfit, SHARED_BENCHES, WORLD_CONSTANTS } from '@dalat/protocol';
+import {
+  PlayerOutfit,
+  sampleWalkableHeight,
+  SHARED_BENCHES,
+  WORLD_CONSTANTS,
+} from '@dalat/protocol';
 import { RemotePeerState, useGameStore } from '../store/gameStore';
+import { worldColliderRegistry } from '../world/colliderRegistry';
 import { AvatarMotionSample, HighlandAvatar } from './HighlandAvatar';
 
 interface PeerAppearanceSlot {
@@ -15,10 +21,16 @@ interface PeerAppearanceSlot {
 }
 
 const _projVec = new THREE.Vector3();
+const _peerRay = new THREE.Ray();
+const _peerDown = new THREE.Vector3(0, -1, 0);
+const _peerInvMat = new THREE.Matrix4();
+const _peerNormMat = new THREE.Matrix3();
+const _peerHitPt = new THREE.Vector3();
+const _peerHitNorm = new THREE.Vector3();
 
 function outfitSignature(p: PeerAppearanceSlot): string {
   const o = p.outfit;
-  return `${p.sessionId}|${p.displayName}|${p.heldItem}|${o.coatStyle}|${o.coatColor}|${o.scarfColor}|${o.headwear}|${o.hairColor}|${o.backpack ? 1 : 0}`;
+  return `${p.sessionId}|${p.displayName}|${p.heldItem}|${o.gender || ''}|${o.coatStyle}|${o.coatColor}|${o.scarfColor}|${o.headwear}|${o.neckwear || ''}|${o.eyewear || ''}|${o.bagStyle || ''}|${o.hairColor}|${o.backpack ? 1 : 0}`;
 }
 
 function shortestAngleDelta(from: number, to: number): number {
@@ -111,8 +123,15 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     temperatureC: 11,
     windStrength: 0.5,
     jamPulse: 0,
+    turnBank: 0,
   });
 
+  const prevYawRef = useRef<number | null>(null);
+  const rayCacheRef = useRef<{ x: number; z: number; floorY: number }>({
+    x: -9999,
+    z: -9999,
+    floorY: 135,
+  });
   const seed = useMemo(() => ((slot.numericId * 0.61803398875) % 1) || 0.42, [slot.numericId]);
 
   useFrame((_, rawDt) => {
@@ -128,7 +147,10 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
       return;
     }
 
-    const hideForPhoto = st.photoModeActive && st.photoHideCrowd;
+    const isDressing = !st.hasEnteredWorld || st.activeModal === 'wardrobe';
+    const overlapsDressingStage =
+      isDressing && Math.hypot(peer.x - st.localTransient.x, peer.z - st.localTransient.z) < 2.8;
+    const hideForPhoto = (st.photoModeActive && st.photoHideCrowd) || overlapsDressingStage;
     grp.visible = !hideForPhoto;
     if (hideForPhoto) {
       if (el) el.style.display = 'none';
@@ -148,6 +170,39 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
         targetZ = bench.position[2];
         targetYaw = bench.yaw;
       }
+    } else if (peer.grounded) {
+      // Cache BVH floor height so stationary or distant bots don't trigger 96 BVH raycasts per frame!
+      const rc = rayCacheRef.current;
+      const moveDeltaSq = (targetX - rc.x) * (targetX - rc.x) + (targetZ - rc.z) * (targetZ - rc.z);
+      if (moveDeltaSq > 0.0064) {
+        rc.x = targetX;
+        rc.z = targetZ;
+        let floorY = Math.max(peer.y, sampleWalkableHeight(targetX, targetZ));
+        const lt = st.localTransient;
+        const distToLocalSq = (targetX - lt.x) * (targetX - lt.x) + (targetZ - lt.z) * (targetZ - lt.z);
+        const collider = distToLocalSq <= 42 * 42 ? worldColliderRegistry.getCollider() : null;
+        if (collider) {
+          const { mesh, bvh } = collider;
+          _peerInvMat.copy(mesh.matrixWorld).invert();
+          _peerNormMat.getNormalMatrix(mesh.matrixWorld);
+          _peerRay.direction.copy(_peerDown).transformDirection(_peerInvMat).normalize();
+          _peerRay.origin.set(targetX, floorY + 1.45, targetZ).applyMatrix4(_peerInvMat);
+          const hit = bvh.raycastFirst(_peerRay, THREE.DoubleSide, 0, 3.4);
+          if (hit) {
+            _peerHitPt.copy(hit.point).applyMatrix4(mesh.matrixWorld);
+            if (hit.face) {
+              _peerHitNorm.copy(hit.face.normal).applyMatrix3(_peerNormMat).normalize();
+            } else {
+              _peerHitNorm.set(0, 1, 0);
+            }
+            if (_peerHitNorm.y >= 0.45 && _peerHitPt.y <= peer.y + 1.15 && _peerHitPt.y > floorY) {
+              floorY = _peerHitPt.y;
+            }
+          }
+        }
+        rc.floorY = floorY;
+      }
+      targetY = rc.floorY + 0.01;
     }
 
     if (!initializedRef.current) {
@@ -167,17 +222,23 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
       st.lastJamNote &&
       (st.lastJamNote.senderId === slot.sessionId || st.lastJamNote.senderName === slot.displayName);
 
+    const prevYaw = prevYawRef.current ?? grp.rotation.y;
+    const yawDelta = shortestAngleDelta(prevYaw, grp.rotation.y);
+    prevYawRef.current = grp.rotation.y;
+    const yawRate = THREE.MathUtils.clamp((yawDelta / Math.max(0.001, dt)) * 0.15, -1, 1);
+
     const m = motionRef.current;
     m.moving = peer.moving;
     m.running = peer.running;
     m.grounded = peer.grounded;
-    m.speed = Math.hypot(peer.vx, peer.vz) || (peer.moving ? (peer.running ? 4.8 : 2.5) : 0);
+    m.speed = Math.hypot(peer.vx, peer.vz) || (peer.moving ? (peer.running ? 6.6 : 3.7) : 0);
     m.seated = Boolean(peer.seatId);
     m.emote = peer.emote;
     m.warmBuff = peer.warmBuff;
     m.temperatureC = st.atmosphere.temperatureC;
     m.windStrength = st.atmosphere.windStrength;
     m.jamPulse = isPeerJam && jamAge < 1.4 ? 1 - jamAge / 1.4 : 0;
+    m.turnBank = -yawRate;
 
     if (el) {
       if (st.photoModeActive || !st.hasEnteredWorld) {
@@ -386,7 +447,7 @@ function FarLanternSilhouettes({ nearSessionIds }: { nearSessionIds: Set<string>
 
 export function PeerCrowdRenderer() {
   const qualityTier = useGameStore((s) => s.qualityTier);
-  const maxNearPeers = qualityTier === 'mobile' ? 16 : 32;
+  const maxNearPeers = qualityTier === 'mobile' ? 6 : qualityTier === 'medium' ? 10 : 14;
 
   const [nearSlots, setNearSlots] = useState<PeerAppearanceSlot[]>([]);
   const lastSigRef = useRef<string>('');
@@ -411,14 +472,20 @@ export function PeerCrowdRenderer() {
         return da - db;
       });
 
-      const selected: PeerAppearanceSlot[] = allPeers.slice(0, maxNearPeers).map((p) => ({
-        sessionId: p.sessionId,
-        numericId: p.numericId,
-        displayName: p.displayName,
-        outfit: p.outfit,
-        heldItem: p.heldItem,
-        isBot: p.isBot,
-      }));
+      const selected: PeerAppearanceSlot[] = allPeers
+        .filter((p) => {
+          const dSq = (p.x - lt.x) * (p.x - lt.x) + (p.z - lt.z) * (p.z - lt.z);
+          return dSq <= 95 * 95;
+        })
+        .slice(0, maxNearPeers)
+        .map((p) => ({
+          sessionId: p.sessionId,
+          numericId: p.numericId,
+          displayName: p.displayName,
+          outfit: p.outfit,
+          heldItem: p.heldItem,
+          isBot: p.isBot,
+        }));
 
       const nextSig = selected.map(outfitSignature).join('||');
       if (nextSig !== lastSigRef.current) {

@@ -1,20 +1,36 @@
 import { Room, type Client } from '@colyseus/core';
 import {
   type AcousticJamNote,
+  type AvatarGender,
+  BAG_CATALOG,
+  type BagStyleId,
   type ChatBubbleMessage,
+  COAT_CATALOG,
   type CoatStyleId,
   decodeClientMove,
   DEFAULT_OUTFIT,
   type EmoteId,
   encodeWorldSnapshot,
+  ensureCoatMatchesGender,
+  EYEWEAR_CATALOG,
+  type EyewearId,
   type FarPeerBeacon,
+  getCoatGender,
+  HEADWEAR_CATALOG,
   type HeadwearId,
+  HELD_PROP_CATALOG,
   type HeldItemId,
   LANDMARK_LIST,
   LANDMARKS,
   type NearPeerTransform,
+  NECKWEAR_CATALOG,
+  type NeckwearId,
   type PlayerOutfit,
   type PolaroidEntry,
+  resolveEffectiveBagStyle,
+  resolveEffectiveEyewear,
+  resolveEffectiveGender,
+  resolveEffectiveNeckwear,
   sampleWalkableHeight,
   SHARED_BENCHES,
   WORLD_CONSTANTS,
@@ -34,21 +50,15 @@ const POETIC_CHANNEL_NAMES = [
   'Dốc Dã Quỳ Vàng',
 ] as const;
 
-const VALID_COAT_STYLES = new Set<CoatStyleId>([
-  'wool_trench',
-  'knit_sweater',
-  'puffer_vest',
-  'vintage_poncho',
+const VALID_COAT_STYLES = new Set<CoatStyleId>(COAT_CATALOG.map((c) => c.id));
+const VALID_HEADWEAR = new Set<HeadwearId>([
+  ...HEADWEAR_CATALOG.map((h) => h.id),
+  'scarf_only',
 ]);
-const VALID_HEADWEAR = new Set<HeadwearId>(['beanie', 'beret', 'scarf_only', 'none']);
-const VALID_HELD_ITEMS = new Set<HeldItemId>([
-  'none',
-  'soy_milk',
-  'phin_coffee',
-  'film_camera',
-  'lantern',
-  'guitar',
-]);
+const VALID_NECKWEAR = new Set<NeckwearId>(NECKWEAR_CATALOG.map((n) => n.id));
+const VALID_EYEWEAR = new Set<EyewearId>(EYEWEAR_CATALOG.map((e) => e.id));
+const VALID_BAG_STYLES = new Set<BagStyleId>(BAG_CATALOG.map((b) => b.id));
+const VALID_HELD_ITEMS = new Set<HeldItemId>(HELD_PROP_CATALOG.map((p) => p.id));
 const VALID_EMOTES = new Set<EmoteId>([
   'none',
   'wave',
@@ -89,6 +99,7 @@ interface HumanEntityTransform {
   burstSlackMeters: number;
   lastTeleportAtMs: number;
   lastChatAtMs: number;
+  lastSocialAtMs: number;
   lastJamAtMs: number;
   lastPolaroidAtMs: number;
   lastChimeAtMs: number;
@@ -158,26 +169,56 @@ function sanitizeOutfit(raw: Partial<PlayerOutfit> | undefined | null): PlayerOu
   if (!raw || typeof raw !== 'object') {
     return { ...DEFAULT_OUTFIT };
   }
+  const headwear: HeadwearId =
+    typeof raw.headwear === 'string' && VALID_HEADWEAR.has(raw.headwear as HeadwearId)
+      ? (raw.headwear as HeadwearId)
+      : DEFAULT_OUTFIT.headwear;
+  const backpackBool = typeof raw.backpack === 'boolean' ? raw.backpack : DEFAULT_OUTFIT.backpack;
+  const bagStyle: BagStyleId =
+    typeof raw.bagStyle === 'string' && VALID_BAG_STYLES.has(raw.bagStyle as BagStyleId)
+      ? (raw.bagStyle as BagStyleId)
+      : backpackBool
+        ? 'trek_pack'
+        : 'none';
+  const neckwear: NeckwearId =
+    typeof raw.neckwear === 'string' && VALID_NECKWEAR.has(raw.neckwear as NeckwearId)
+      ? (raw.neckwear as NeckwearId)
+      : headwear === 'none'
+        ? 'none'
+        : 'knit_scarf';
+  const eyewear: EyewearId =
+    typeof raw.eyewear === 'string' && VALID_EYEWEAR.has(raw.eyewear as EyewearId)
+      ? (raw.eyewear as EyewearId)
+      : 'none';
+
+  const rawCoatStyle: CoatStyleId =
+    typeof raw.coatStyle === 'string' && VALID_COAT_STYLES.has(raw.coatStyle as CoatStyleId)
+      ? (raw.coatStyle as CoatStyleId)
+      : DEFAULT_OUTFIT.coatStyle;
+  const gender: AvatarGender =
+    raw.gender === 'male' || raw.gender === 'female'
+      ? raw.gender
+      : getCoatGender(rawCoatStyle);
+  const coatStyle: CoatStyleId = ensureCoatMatchesGender(rawCoatStyle, gender);
+
   return {
-    coatStyle:
-      typeof raw.coatStyle === 'string' && VALID_COAT_STYLES.has(raw.coatStyle as CoatStyleId)
-        ? (raw.coatStyle as CoatStyleId)
-        : DEFAULT_OUTFIT.coatStyle,
+    gender,
+    coatStyle,
     coatColor: sanitizeHexColor(raw.coatColor, DEFAULT_OUTFIT.coatColor),
     scarfColor: sanitizeHexColor(raw.scarfColor, DEFAULT_OUTFIT.scarfColor),
-    headwear:
-      typeof raw.headwear === 'string' && VALID_HEADWEAR.has(raw.headwear as HeadwearId)
-        ? (raw.headwear as HeadwearId)
-        : DEFAULT_OUTFIT.headwear,
+    headwear,
+    neckwear,
+    eyewear,
+    bagStyle,
     hairColor: sanitizeHexColor(raw.hairColor, DEFAULT_OUTFIT.hairColor),
-    backpack: typeof raw.backpack === 'boolean' ? raw.backpack : DEFAULT_OUTFIT.backpack,
+    backpack: bagStyle !== 'none',
   };
 }
 
 function isNearAnyLandmark(x: number, z: number): boolean {
   for (let i = 0; i < LANDMARK_LIST.length; i++) {
     const [lx, , lz] = LANDMARK_LIST[i].position;
-    if (Math.hypot(x - lx, z - lz) <= 13.5) {
+    if (Math.hypot(x - lx, z - lz) <= 18.0) {
       return true;
     }
   }
@@ -271,13 +312,17 @@ export class CloudHuntingRoom extends Room<{
     ps.numericId = bot.numericId;
     ps.sessionId = bot.spec.sessionId;
     ps.displayName = bot.spec.displayName;
+    ps.gender = getCoatGender(bot.spec.coatStyle);
     ps.coatStyle = bot.spec.coatStyle;
     ps.coatColor = bot.spec.coatColor;
     ps.scarfColor = bot.spec.scarfColor;
     ps.headwear = bot.spec.headwear;
+    ps.neckwear = bot.spec.neckwear;
+    ps.eyewear = bot.spec.eyewear;
+    ps.bagStyle = bot.spec.bagStyle;
     ps.hairColor = bot.spec.hairColor;
     ps.backpack = bot.spec.backpack;
-    ps.heldItem = bot.spec.heldItem;
+    ps.heldItem = bot.heldItem;
     ps.emote = bot.emote;
     ps.seatId = '';
     ps.isBot = true;
@@ -306,6 +351,14 @@ export class CloudHuntingRoom extends Room<{
       });
     });
 
+    // 2b. Explicit client hydration request (guaranteed after client binds room.onMessage handlers)
+    this.onMessage('req_world_init', (client) => {
+      const ent = this.humanEntities.get(client.sessionId);
+      if (ent) {
+        this.sendWorldHydration(client, ent.numericId);
+      }
+    });
+
     // 3. Profile & highland coat/scarf customization
     this.onMessage(
       'profile',
@@ -320,10 +373,14 @@ export class CloudHuntingRoom extends Room<{
         }
         if (payload?.outfit) {
           const outfit = sanitizeOutfit(payload.outfit);
+          ps.gender = resolveEffectiveGender(outfit);
           ps.coatStyle = outfit.coatStyle;
           ps.coatColor = outfit.coatColor;
           ps.scarfColor = outfit.scarfColor;
           ps.headwear = outfit.headwear;
+          ps.neckwear = resolveEffectiveNeckwear(outfit);
+          ps.eyewear = resolveEffectiveEyewear(outfit);
+          ps.bagStyle = resolveEffectiveBagStyle(outfit);
           ps.hairColor = outfit.hairColor;
           ps.backpack = outfit.backpack;
         }
@@ -386,6 +443,116 @@ export class CloudHuntingRoom extends Room<{
         }
       }
     });
+
+    // 6b. Quick Social Interactions (Wave / Warm Cup Clink / Cheer Sunrise)
+    this.onMessage(
+      'social_interact',
+      (
+        client,
+        payload: { targetSessionId?: string; kind?: 'greet' | 'cheers' | 'cheer' }
+      ) => {
+        const ent = this.humanEntities.get(client.sessionId);
+        const ps = this.state.players.get(client.sessionId);
+        if (!ent || !ps) return;
+
+        const now = Date.now();
+        if (now - ent.lastSocialAtMs < 900) return;
+
+        const targetId =
+          typeof payload?.targetSessionId === 'string' ? payload.targetSessionId.trim() : '';
+        const kind = payload?.kind;
+        if (!targetId || (kind !== 'greet' && kind !== 'cheers' && kind !== 'cheer')) {
+          return;
+        }
+        ent.lastSocialAtMs = now;
+
+        // Check if target is a human peer or an autonomous ambient hiker within 10m
+        const targetHuman = this.humanEntities.get(targetId);
+        let midX = ent.x;
+        let midY = ent.y + 1.45;
+        let midZ = ent.z;
+
+        if (targetHuman) {
+          if (Math.hypot(targetHuman.x - ent.x, targetHuman.z - ent.z) > 10.5) return;
+          midX = (ent.x + targetHuman.x) * 0.5;
+          midY = (ent.y + targetHuman.y) * 0.5 + 1.48;
+          midZ = (ent.z + targetHuman.z) * 0.5;
+          if (kind === 'cheers') {
+            ent.warmBuff = true;
+            targetHuman.warmBuff = true;
+          }
+        } else {
+          const botReaction = this.ambientHikers.reactToSocial(
+            targetId,
+            ent.x,
+            ent.z,
+            ps.displayName,
+            kind
+          );
+          if (!botReaction) return;
+          const { bot, emote, heldItem, replyText } = botReaction;
+          if (Math.hypot(bot.x - ent.x, bot.z - ent.z) > 10.5) return;
+          midX = (ent.x + bot.x) * 0.5;
+          midY = (ent.y + bot.y) * 0.5 + 1.48;
+          midZ = (ent.z + bot.z) * 0.5;
+          if (kind === 'cheers') {
+            ent.warmBuff = true;
+          }
+
+          const botSchema = this.state.players.get(bot.spec.sessionId);
+          if (botSchema) {
+            botSchema.emote = emote;
+            botSchema.heldItem = heldItem;
+          }
+
+          // Broadcast warm Đà Lạt reply bubble from the ambient hiker within proximity
+          const botBubble: ChatBubbleMessage = {
+            id: `bot-msg-${now}-${Math.random().toString(36).slice(2, 6)}`,
+            senderId: bot.spec.sessionId,
+            senderName: bot.spec.displayName,
+            text: replyText,
+            x: bot.x,
+            y: bot.y,
+            z: bot.z,
+            timestamp: now,
+          };
+          for (let i = 0; i < this.clients.length; i++) {
+            const c = this.clients[i];
+            const other = this.humanEntities.get(c.sessionId);
+            if (
+              c.sessionId === client.sessionId ||
+              (other &&
+                Math.hypot(other.x - bot.x, other.z - bot.z) <=
+                  WORLD_CONSTANTS.PROXIMITY_CHAT_RADIUS)
+            ) {
+              c.send('chat_bubble', botBubble);
+            }
+          }
+        }
+
+        // Broadcast 3D social sparkle & toast event to nearby clients
+        const evtPayload = {
+          fromId: client.sessionId,
+          fromName: ps.displayName,
+          targetId,
+          kind,
+          x: midX,
+          y: midY,
+          z: midZ,
+        };
+        for (let i = 0; i < this.clients.length; i++) {
+          const c = this.clients[i];
+          const other = this.humanEntities.get(c.sessionId);
+          if (
+            c.sessionId === client.sessionId ||
+            c.sessionId === targetId ||
+            (other && Math.hypot(other.x - midX, other.z - midZ) <= 38)
+          ) {
+            c.send('social_event', evtPayload);
+          }
+        }
+      }
+    );
 
     // 7. Atomic shared bench seating
     this.onMessage('seat_req', (client, payload: { benchId?: string | null }) => {
@@ -609,8 +776,8 @@ export class CloudHuntingRoom extends Room<{
       const stepBudget = dtSec * maxAllowedSpeed + ent.burstSlackMeters;
 
       if (horizDist > stepBudget) {
-        // Allow legitimate Landmark Fast-Travel with a 1.2s cooldown
-        if (isNearAnyLandmark(nx, nz) && wallNow - ent.lastTeleportAtMs > 1200) {
+        // Allow legitimate Landmark Fast-Travel with a 200ms cooldown
+        if (isNearAnyLandmark(nx, nz) && wallNow - ent.lastTeleportAtMs > 200) {
           ent.lastTeleportAtMs = wallNow;
           ent.burstSlackMeters = 4.5;
           const ps = this.state.players.get(client.sessionId);
@@ -641,8 +808,8 @@ export class CloudHuntingRoom extends Room<{
 
     // 4. Smooth horizontal velocity estimate for client Cubic Hermite spline tangents
     if (ent.hasReceivedMove && pkt.moving && wallNow - ent.lastTeleportAtMs > 250) {
-      const instVx = clamp((nx - ent.x) / dtSec, -9.5, 9.5);
-      const instVz = clamp((nz - ent.z) / dtSec, -9.5, 9.5);
+      const instVx = clamp((nx - ent.x) / dtSec, -11.5, 11.5);
+      const instVz = clamp((nz - ent.z) / dtSec, -11.5, 11.5);
       ent.vx = ent.vx * 0.35 + instVx * 0.65;
       ent.vz = ent.vz * 0.35 + instVz * 0.65;
     } else if (!pkt.moving) {
@@ -709,10 +876,14 @@ export class CloudHuntingRoom extends Room<{
     ps.numericId = numericId;
     ps.sessionId = client.sessionId;
     ps.displayName = cleanName;
+    ps.gender = resolveEffectiveGender(outfit);
     ps.coatStyle = outfit.coatStyle;
     ps.coatColor = outfit.coatColor;
     ps.scarfColor = outfit.scarfColor;
     ps.headwear = outfit.headwear;
+    ps.neckwear = resolveEffectiveNeckwear(outfit);
+    ps.eyewear = resolveEffectiveEyewear(outfit);
+    ps.bagStyle = resolveEffectiveBagStyle(outfit);
     ps.hairColor = outfit.hairColor;
     ps.backpack = outfit.backpack;
     ps.heldItem = heldItem;
@@ -745,6 +916,7 @@ export class CloudHuntingRoom extends Room<{
       burstSlackMeters: 4.5,
       lastTeleportAtMs: 0,
       lastChatAtMs: 0,
+      lastSocialAtMs: 0,
       lastJamAtMs: 0,
       lastPolaroidAtMs: 0,
       lastChimeAtMs: 0,
@@ -752,7 +924,11 @@ export class CloudHuntingRoom extends Room<{
     });
 
     this.syncAmbientBotPopulation();
-    this.sendWorldHydration(client, numericId);
+    setTimeout(() => {
+      if (this.humanEntities.has(client.sessionId)) {
+        this.sendWorldHydration(client, numericId);
+      }
+    }, 50);
   }
 
   private sendWorldHydration(client: Client, numericId: number): void {
@@ -819,8 +995,13 @@ export class CloudHuntingRoom extends Room<{
     for (let i = 0; i < emoteChanges.length; i++) {
       const change = emoteChanges[i];
       const botSchema = this.state.players.get(change.sessionId);
-      if (botSchema && botSchema.emote !== change.emote) {
-        botSchema.emote = change.emote;
+      if (botSchema) {
+        if (botSchema.emote !== change.emote) {
+          botSchema.emote = change.emote;
+        }
+        if (botSchema.heldItem !== change.heldItem) {
+          botSchema.heldItem = change.heldItem;
+        }
       }
     }
 

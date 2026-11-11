@@ -1,6 +1,32 @@
 {
   "polaroids": [
     {
+      "id": "pol-1794297444803-0uroz",
+      "authorName": "Minh Khôi",
+      "caption": "Bình minh săn mây 2026",
+      "landmarkId": "quan-mo-suong",
+      "landmarkName": "Đồi Chè Cầu Đất",
+      "weatherId": "golden_cloud_sea",
+      "gameTimeLabel": "05:30 AM",
+      "altitudeASL": 1620,
+      "imageDataUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "likes": 2,
+      "createdAt": 1794297444803
+    },
+    {
+      "id": "pol-1794297374057-mcquv",
+      "authorName": "Minh Khôi",
+      "caption": "Bình minh săn mây 2026",
+      "landmarkId": "quan-mo-suong",
+      "landmarkName": "Đồi Chè Cầu Đất",
+      "weatherId": "golden_cloud_sea",
+      "gameTimeLabel": "05:30 AM",
+      "altitudeASL": 1620,
+      "imageDataUrl": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+      "likes": 2,
+      "createdAt": 1794297374057
+    },
+    {
       "id": "seed-polaroid-1",
       "authorName": "Minh Thư",
       "caption": "Biển mây đầu mùa tràn qua đồi chè cổ, nắng ấm đến tận đầu ngón tay ✨",
@@ -42,6 +68,18 @@
   ],
   "windChimeNotes": [
     {
+      "id": "chime-1794297444804-z77pl",
+      "authorName": "Minh Khôi",
+      "message": "Chúc mọi người săn mây Đà Lạt luôn bình yên và ấm áp!",
+      "createdAt": 1794297444804
+    },
+    {
+      "id": "chime-1794297374058-ggld4",
+      "authorName": "Minh Khôi",
+      "message": "Chúc mọi người săn mây Đà Lạt luôn bình yên và ấm áp!",
+      "createdAt": 1794297374058
+    },
+    {
       "id": "seed-chime-1",
       "authorName": "Thảo Vy",
       "message": "Mong những người thương nhau sẽ luôn tìm thấy nhau giữa sương mù Đà Lạt.",
@@ -72,5 +110,5 @@
       "createdAt": 1793951897433
     }
   ],
-  "updatedAt": 1793964522887
+  "updatedAt": 1794297445355
 }

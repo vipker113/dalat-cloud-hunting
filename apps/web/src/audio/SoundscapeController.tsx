@@ -256,6 +256,7 @@ function playHighlandJamChord(
 
 export function SoundscapeController() {
   const lastJamNote = useGameStore((s) => s.lastJamNote);
+  const socialSparkleBurst = useGameStore((s) => s.socialSparkleBurst);
   const audioEnabled = useGameStore((s) => s.audioEnabled);
   const masterVolume = useGameStore((s) => s.masterVolume);
 
@@ -263,6 +264,9 @@ export function SoundscapeController() {
   const ownerIdRef = useRef<symbol>(Symbol('DaLatSoundscapeController'));
   const seenJamTimestampRef = useRef<number>(
     useGameStore.getState().lastJamNote?.timestamp ?? 0
+  );
+  const seenSocialNonceRef = useRef<number>(
+    useGameStore.getState().socialSparkleBurst?.id ?? 0
   );
   const lastManualJamMsRef = useRef<number>(0);
 
@@ -503,6 +507,62 @@ export function SoundscapeController() {
 
     playHighlandJamChord(eng, lastJamNote, spatialGain);
   }, [lastJamNote]);
+
+  // Warm ceramic cup-clink or crystalline greeting chime on Quick Social Interactions!
+  useEffect(() => {
+    if (!socialSparkleBurst) return;
+    if (socialSparkleBurst.id === seenSocialNonceRef.current) return;
+    seenSocialNonceRef.current = socialSparkleBurst.id;
+
+    const st = useGameStore.getState();
+    if (!st.audioEnabled) return;
+    const eng = engineRef.current;
+    if (!eng) return;
+    if (eng.ctx.state === 'suspended') {
+      void eng.ctx.resume().catch(() => {});
+    }
+    if (eng.ctx.state !== 'running') return;
+
+    const { ctx, masterGain } = eng;
+    const now = ctx.currentTime + 0.01;
+
+    if (socialSparkleBurst.kind === 'cheers') {
+      // Warm ceramic/glass cup clink: fundamental + resonant harmonic ring
+      const freqs = [1396.91, 2093.0, 2793.83];
+      for (let i = 0; i < freqs.length; i++) {
+        const osc = ctx.createOscillator();
+        const env = ctx.createGain();
+        osc.type = i === 0 ? 'triangle' : 'sine';
+        osc.frequency.setValueAtTime(freqs[i], now + i * 0.006);
+        const peak = i === 0 ? 0.075 : i === 1 ? 0.045 : 0.022;
+        env.gain.setValueAtTime(0.0001, now);
+        env.gain.linearRampToValueAtTime(peak, now + 0.005);
+        env.gain.exponentialRampToValueAtTime(0.0001, now + 0.42 - i * 0.08);
+        osc.connect(env);
+        env.connect(masterGain);
+        osc.start(now + i * 0.006);
+        osc.stop(now + 0.46);
+      }
+    } else {
+      // Gentle two-note ascending Đà Lạt greeting bell (D5 -> A5)
+      const notes =
+        socialSparkleBurst.kind === 'cheer' ? [587.33, 783.99, 1174.66] : [587.33, 880.0];
+      for (let i = 0; i < notes.length; i++) {
+        const t0 = now + i * 0.085;
+        const osc = ctx.createOscillator();
+        const env = ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(notes[i], t0);
+        env.gain.setValueAtTime(0.0001, t0);
+        env.gain.linearRampToValueAtTime(0.055, t0 + 0.01);
+        env.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.55);
+        osc.connect(env);
+        env.connect(masterGain);
+        osc.start(t0);
+        osc.stop(t0 + 0.58);
+      }
+    }
+  }, [socialSparkleBurst]);
 
   return null;
 }

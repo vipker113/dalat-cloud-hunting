@@ -83,6 +83,10 @@ export function installDalatQABridge() {
         x: Math.round(lt.x * 100) / 100,
         y: Math.round(lt.y * 100) / 100,
         z: Math.round(lt.z * 100) / 100,
+        yaw: Math.round(lt.yaw * 1000) / 1000,
+        cameraYaw: Math.round(lt.cameraYaw * 1000) / 1000,
+        cameraPitch: Math.round(lt.cameraPitch * 1000) / 1000,
+        photoModeActive: st.photoModeActive,
         altitudeASL: gameYToASL(lt.y),
         surfaceType: getSurfaceType(lt.x, lt.z),
         moving: lt.moving,
@@ -92,6 +96,19 @@ export function installDalatQABridge() {
         heldItem: st.heldItem,
         activeEmote: st.activeEmote,
         seatedBenchId: st.seatedBenchId,
+        nearbyPeer: st.nearbyPeer,
+        previewYaw: Math.round(lt.previewCurrentYaw * 1000) / 1000,
+        previewPanY: Math.round(lt.previewCurrentPanY * 1000) / 1000,
+        previewZoom: Math.round(lt.previewCurrentZoom * 1000) / 1000,
+        peersList: Object.values(st.peers).map((p) => ({
+          sessionId: p.sessionId,
+          displayName: p.displayName,
+          x: Math.round(p.x * 10) / 10,
+          y: Math.round(p.y * 10) / 10,
+          z: Math.round(p.z * 10) / 10,
+          emote: p.emote,
+          heldItem: p.heldItem,
+        })),
         discoveredLandmarks: st.discoveredLandmarks,
       };
     },
@@ -199,8 +216,31 @@ export function installDalatQABridge() {
           break;
         case 'sit_bench': {
           const benchId = (payload.benchId as string) || SHARED_BENCHES[0].id;
+          const bench = SHARED_BENCHES.find((b) => b.id === benchId);
+          if (bench) {
+            st.localTransient.x = bench.position[0];
+            st.localTransient.y = bench.position[1];
+            st.localTransient.z = bench.position[2];
+            st.localTransient.vx = 0;
+            st.localTransient.vy = 0;
+            st.localTransient.vz = 0;
+            st.localTransient.moving = false;
+            st.localTransient.running = false;
+            st.localTransient.yaw = bench.yaw;
+          }
           boundNet?.requestBenchSeat(benchId);
           st.setSeatedBench(benchId);
+          break;
+        }
+        case 'stand_up': {
+          boundNet?.requestBenchSeat(null);
+          st.setSeatedBench(null);
+          break;
+        }
+        case 'set_outfit': {
+          st.updateOutfit(payload as Partial<typeof st.outfit>);
+          const updated = useGameStore.getState();
+          boundNet?.sendProfile(updated.displayName, updated.outfit);
           break;
         }
         case 'jam_guitar': {

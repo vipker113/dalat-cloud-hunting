@@ -1,6 +1,8 @@
 import { Client, getStateCallbacks, type Room } from '@colyseus/sdk';
 import {
   type AcousticJamNote,
+  type AvatarGender,
+  type BagStyleId,
   type ChatBubbleMessage,
   type ClientMoveInput,
   type CoatStyleId,
@@ -8,11 +10,16 @@ import {
   DEFAULT_OUTFIT,
   type EmoteId,
   encodeClientMove,
+  ensureCoatMatchesGender,
+  type EyewearId,
   type FarPeerBeacon,
+  getCoatGender,
   type HeadwearId,
   type HeldItemId,
+  type NeckwearId,
   type PlayerOutfit,
   type PolaroidEntry,
+  resolveEffectiveGender,
   sampleWalkableHeight,
   SHARED_BENCHES,
   type WindChimeNote,
@@ -32,10 +39,14 @@ interface ReflectedPlayer {
   numericId: number;
   sessionId: string;
   displayName: string;
+  gender?: string;
   coatStyle: string;
   coatColor: string;
   scarfColor: string;
   headwear: string;
+  neckwear?: string;
+  eyewear?: string;
+  bagStyle?: string;
   hairColor: string;
   backpack: boolean;
   heldItem: string;
@@ -46,6 +57,10 @@ interface ReflectedPlayer {
   spawnY: number;
   spawnZ: number;
   spawnYaw: number;
+}
+
+function buildProfileKey(displayName: string, o: PlayerOutfit): string {
+  return `${displayName}|${o.gender || ''}|${o.coatStyle}|${o.coatColor}|${o.scarfColor}|${o.headwear}|${o.neckwear || ''}|${o.eyewear || ''}|${o.bagStyle || ''}|${o.hairColor}|${o.backpack ? 1 : 0}`;
 }
 
 interface ReflectedRoomState {
@@ -191,9 +206,20 @@ function resolveServerEndpoints(): { wsUrl: string; httpUrl: string } {
   if (typeof window !== 'undefined') {
     const isSecure = window.location.protocol === 'https:';
     const host = window.location.hostname || 'localhost';
+    const port = window.location.port;
+    const isViteDevPort = port === '5173' || port === '4173' || port === '4179';
+
+    if (isViteDevPort) {
+      return {
+        wsUrl: `${isSecure ? 'wss' : 'ws'}://${host}:2567`,
+        httpUrl: `${isSecure ? 'https' : 'http'}://${host}:2567`,
+      };
+    }
+
+    // Production unified server or reverse-proxy mode: use same host & port
     return {
-      wsUrl: `${isSecure ? 'wss' : 'ws'}://${host}:2567`,
-      httpUrl: `${isSecure ? 'https' : 'http'}://${host}:2567`,
+      wsUrl: `${isSecure ? 'wss' : 'ws'}://${window.location.host}`,
+      httpUrl: window.location.origin,
     };
   }
 
@@ -271,7 +297,7 @@ class MultiplayerClientController implements IMultiplayerController {
     useGameStore.subscribe((state, prev) => {
       if (!this.room || !state.connected) return;
 
-      const profileKey = `${state.displayName}|${state.outfit.coatStyle}|${state.outfit.coatColor}|${state.outfit.scarfColor}|${state.outfit.headwear}|${state.outfit.hairColor}|${state.outfit.backpack}`;
+      const profileKey = buildProfileKey(state.displayName, state.outfit);
       if (
         (state.displayName !== prev.displayName || state.outfit !== prev.outfit) &&
         profileKey !== this.lastSentProfileKey
@@ -392,7 +418,7 @@ class MultiplayerClientController implements IMultiplayerController {
       this.desiredRoomCode = finalCode;
       syncUrlRoomCode(finalCode);
 
-      this.lastSentProfileKey = `${store.displayName}|${store.outfit.coatStyle}|${store.outfit.coatColor}|${store.outfit.scarfColor}|${store.outfit.headwear}|${store.outfit.hairColor}|${store.outfit.backpack}`;
+      this.lastSentProfileKey = buildProfileKey(store.displayName, store.outfit);
       this.lastSentHeldItem = store.heldItem;
       this.lastSentEmote = store.activeEmote;
 
@@ -407,6 +433,7 @@ class MultiplayerClientController implements IMultiplayerController {
       });
 
       this.bindRoomHandlers(joinedRoom);
+      joinedRoom.send('req_world_init');
       this.startCristianClockSync(joinedRoom);
       void this.refreshChannels();
     } catch {
@@ -514,19 +541,12 @@ class MultiplayerClientController implements IMultiplayerController {
   }
 
   public sendProfile(displayName: string, outfit: PlayerOutfit): void {
-    this.lastSentProfileKey = `${displayName}|${outfit.coatStyle}|${outfit.coatColor}|${outfit.scarfColor}|${outfit.headwear}|${outfit.hairColor}|${outfit.backpack}`;
+    this.lastSentProfileKey = buildProfileKey(displayName, outfit);
     const st = useGameStore.getState();
     if (st.displayName !== displayName) {
       st.setDisplayName(displayName);
     }
-    if (
-      st.outfit.coatStyle !== outfit.coatStyle ||
-      st.outfit.coatColor !== outfit.coatColor ||
-      st.outfit.scarfColor !== outfit.scarfColor ||
-      st.outfit.headwear !== outfit.headwear ||
-      st.outfit.hairColor !== outfit.hairColor ||
-      st.outfit.backpack !== outfit.backpack
-    ) {
+    if (buildProfileKey(st.displayName, st.outfit) !== buildProfileKey(st.displayName, outfit)) {
       st.updateOutfit(outfit);
     }
     if (!this.room || !useGameStore.getState().connected) return;
@@ -551,6 +571,44 @@ class MultiplayerClientController implements IMultiplayerController {
     }
     if (!this.room || !useGameStore.getState().connected) return;
     this.room.send('emote', { emote });
+  }
+
+  public sendSocialInteract(
+    targetSessionId: string,
+    kind: 'greet' | 'cheers' | 'cheer'
+  ): void {
+    if (!targetSessionId) return;
+    if (this.room && useGameStore.getState().connected) {
+      this.room.send('social_interact', { targetSessionId, kind });
+      return;
+    }
+
+    // Offline fallback reciprocal reaction for local peers/bots
+    const st = useGameStore.getState();
+    const peer = st.peers[targetSessionId];
+    if (!peer || !peer.isBot) return;
+    const replyEmote: EmoteId =
+      kind === 'cheers' ? 'cheers_cup' : kind === 'cheer' ? 'cheer_sunrise' : 'wave';
+    const faceYaw = Math.atan2(st.localTransient.x - peer.x, st.localTransient.z - peer.z);
+    st.upsertPeer({ ...peer, yaw: faceYaw, moving: false, emote: replyEmote });
+    const replyLine =
+      kind === 'cheers'
+        ? `Cụng ly ấm nhé ${st.displayName}! Sáng Cầu Đất có ly nóng ấm lòng ghê ☕✨`
+        : kind === 'cheer'
+          ? `Đẹp mê hồn luôn ${st.displayName} ơi! Biển mây hôm nay dày quá! 🌅`
+          : `Chào ${st.displayName} nha! Đi săn mây sớm vậy 👋`;
+    setTimeout(() => {
+      useGameStore.getState().pushChatBubble({
+        id: `offline-social-${Date.now()}`,
+        senderId: peer.sessionId,
+        senderName: peer.displayName,
+        text: replyLine,
+        x: peer.x,
+        y: peer.y,
+        z: peer.z,
+        timestamp: Date.now(),
+      });
+    }, 420);
   }
 
   public requestBenchSeat(benchId: string | null): void {
@@ -961,6 +1019,42 @@ class MultiplayerClientController implements IMultiplayerController {
       }
     });
 
+    // 5b. Quick Social Interactions (Wave / Warm Cup Clink / Cheer Sunrise)
+    room.onMessage(
+      'social_event',
+      (evt: {
+        fromId?: string;
+        fromName?: string;
+        targetId?: string;
+        kind?: 'greet' | 'cheers' | 'cheer';
+        x?: number;
+        y?: number;
+        z?: number;
+      }) => {
+        if (!evt || !evt.kind) return;
+        const st = useGameStore.getState();
+        if (
+          evt.fromId !== room.sessionId &&
+          typeof evt.x === 'number' &&
+          typeof evt.y === 'number' &&
+          typeof evt.z === 'number'
+        ) {
+          st.triggerSocialSparkle(evt.kind, evt.x, evt.y, evt.z);
+        }
+        if (evt.targetId === room.sessionId && evt.fromId !== room.sessionId) {
+          const sender = evt.fromName || 'Một lữ khách';
+          if (evt.kind === 'cheers') {
+            st.grantWarmthBuff(480);
+            st.showToast(`☕ ${sender} vừa cụng ly ấm cùng bạn — Giữ ấm +8 phút (+12% bước chân)!`);
+          } else if (evt.kind === 'greet') {
+            st.showToast(`👋 ${sender} đang vẫy tay chào bạn giữa sương sớm!`);
+          } else if (evt.kind === 'cheer') {
+            st.showToast(`🙌 ${sender} đang reo vui đón biển mây cùng bạn!`);
+          }
+        }
+      }
+    );
+
     // 6. Atomic Shared Bench Ack
     room.onMessage(
       'seat_ack',
@@ -1067,11 +1161,22 @@ class MultiplayerClientController implements IMultiplayerController {
     this.numericIdToSessionId.set(player.numericId, sessionId);
     const existing = useGameStore.getState().peers[sessionId];
 
+    const rawCoatStyle = (player.coatStyle as CoatStyleId) || DEFAULT_OUTFIT.coatStyle;
+    const effGender: AvatarGender =
+      player.gender === 'male' || player.gender === 'female'
+        ? player.gender
+        : getCoatGender(rawCoatStyle);
     const outfit: PlayerOutfit = {
-      coatStyle: (player.coatStyle as CoatStyleId) || DEFAULT_OUTFIT.coatStyle,
+      gender: effGender,
+      coatStyle: ensureCoatMatchesGender(rawCoatStyle, effGender),
       coatColor: player.coatColor || DEFAULT_OUTFIT.coatColor,
       scarfColor: player.scarfColor || DEFAULT_OUTFIT.scarfColor,
       headwear: (player.headwear as HeadwearId) || DEFAULT_OUTFIT.headwear,
+      neckwear: (player.neckwear as NeckwearId) || DEFAULT_OUTFIT.neckwear,
+      eyewear: (player.eyewear as EyewearId) || DEFAULT_OUTFIT.eyewear,
+      bagStyle:
+        (player.bagStyle as BagStyleId) ||
+        (typeof player.backpack === 'boolean' && !player.backpack ? 'none' : 'trek_pack'),
       hairColor: player.hairColor || DEFAULT_OUTFIT.hairColor,
       backpack: typeof player.backpack === 'boolean' ? player.backpack : true,
     };
@@ -1089,10 +1194,14 @@ class MultiplayerClientController implements IMultiplayerController {
       existing.heldItem === heldItem &&
       existing.emote === emote &&
       existing.seatId === seatId &&
+      existing.outfit.gender === outfit.gender &&
       existing.outfit.coatStyle === outfit.coatStyle &&
       existing.outfit.coatColor === outfit.coatColor &&
       existing.outfit.scarfColor === outfit.scarfColor &&
       existing.outfit.headwear === outfit.headwear &&
+      existing.outfit.neckwear === outfit.neckwear &&
+      existing.outfit.eyewear === outfit.eyewear &&
+      existing.outfit.bagStyle === outfit.bagStyle &&
       existing.outfit.hairColor === outfit.hairColor &&
       existing.outfit.backpack === outfit.backpack
     ) {

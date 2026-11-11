@@ -11,7 +11,9 @@
   "scripts": {
     "dev:server": "bun run --cwd apps/server dev",
     "dev:web": "bun run --cwd apps/web dev",
+    "build": "bun run --cwd apps/web build",
     "build:web": "bun run --cwd apps/web build",
+    "start": "bun run --cwd apps/server start",
     "typecheck": "bun run --cwd packages/protocol typecheck && bun run --cwd apps/server typecheck && bun run --cwd apps/web typecheck",
     "stress:bots": "bun run apps/server/src/botSwarm.ts"
   },

@@ -1,6 +1,6 @@
-import { SHARED_BENCHES, sampleWalkableHeight } from '@dalat/protocol';
+import { isWarmEdibleOrDrinkProp, SHARED_BENCHES, sampleWalkableHeight } from '@dalat/protocol';
 import type { IMultiplayerController } from '../network/types';
-import { InteractPrompt, useGameStore } from '../store/gameStore';
+import { InteractPrompt, NearbyPeerInfo, useGameStore } from '../store/gameStore';
 
 export const INTERACTION_SPOTS = {
   CAFE_PHIN_COUNTER: [-41.0, 135.15, 31.0] as [number, number, number],
@@ -150,6 +150,133 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
 
 export function isNearCampfireStage(px: number, pz: number): boolean {
   return dist2D(px, pz, INTERACTION_SPOTS.CAMPFIRE_STAGE[0], INTERACTION_SPOTS.CAMPFIRE_STAGE[2]) <= 6.2;
+}
+
+/**
+ * Finds the closest fellow cloud-hunter or ambient hiker within quick-greeting proximity (<= 5.6m).
+ */
+export function evaluateNearbyPeer(
+  px: number,
+  py: number,
+  pz: number
+): NearbyPeerInfo | null {
+  const peers = useGameStore.getState().peers;
+  let closest: NearbyPeerInfo | null = null;
+  let bestDist = 5.6;
+
+  for (const sessionId in peers) {
+    const p = peers[sessionId];
+    if (!p) continue;
+    if (Math.abs(p.y - py) > 2.8) continue;
+    const d = dist2D(px, pz, p.x, p.z);
+    if (d <= bestDist) {
+      bestDist = d;
+      closest = {
+        sessionId: p.sessionId,
+        displayName: p.displayName,
+        isBot: p.isBot,
+        heldItem: p.heldItem,
+        emote: p.emote,
+        x: Math.round(p.x * 10) / 10,
+        y: Math.round(p.y * 10) / 10,
+        z: Math.round(p.z * 10) / 10,
+        distance: Math.round(d * 10) / 10,
+      };
+    }
+  }
+
+  return closest;
+}
+
+export type PeerSocialActionKind = 'greet' | 'cheers' | 'cheer' | 'photo';
+
+let lastSocialChatMs = 0;
+
+/**
+ * Executes a cozy quick-social interaction with a nearby cloud-hunter (human or ambient hiker).
+ */
+export function executePeerSocialAction(
+  kind: PeerSocialActionKind,
+  peerSnapshot: NearbyPeerInfo,
+  net: IMultiplayerController
+): void {
+  const st = useGameStore.getState();
+  const lt = st.localTransient;
+  const livePeer = st.peers[peerSnapshot.sessionId] ?? peerSnapshot;
+
+  const dx = livePeer.x - lt.x;
+  const dz = livePeer.z - lt.z;
+  if (!st.seatedBenchId && Math.hypot(dx, dz) > 0.05) {
+    lt.yaw = Math.atan2(dx, dz);
+  }
+
+  const midX = (lt.x + livePeer.x) * 0.5;
+  const midY = (lt.y + livePeer.y) * 0.5 + 1.48;
+  const midZ = (lt.z + livePeer.z) * 0.5;
+  const now = Date.now();
+
+  if (kind === 'greet') {
+    playTemporaryEmote('wave', net, 3600);
+    st.triggerSocialSparkle('greet', midX, midY, midZ);
+    net.sendSocialInteract(livePeer.sessionId, 'greet');
+    if (now - lastSocialChatMs > 2600) {
+      lastSocialChatMs = now;
+      net.sendChat(`Chào ${livePeer.displayName} nhé! Sương sớm Cầu Đất đẹp quá ✨`);
+    }
+    st.showToast(`👋 Đã vẫy tay chào ${livePeer.displayName}!`);
+    return;
+  }
+
+  if (kind === 'cheers') {
+    if (!isWarmEdibleOrDrinkProp(st.heldItem) && st.heldItem !== 'sparkler') {
+      st.setHeldItem('soy_milk');
+      net.sendHeldItem('soy_milk');
+    }
+    st.grantWarmthBuff(480);
+    playTemporaryEmote('cheers_cup', net, 3900);
+    st.triggerSocialSparkle('cheers', midX, midY + 0.1, midZ);
+    net.sendSocialInteract(livePeer.sessionId, 'cheers');
+    if (now - lastSocialChatMs > 2600) {
+      lastSocialChatMs = now;
+      net.sendChat(`Cụng ly ấm nhé ${livePeer.displayName}! ☕✨`);
+    }
+    st.showToast(
+      `☕ Cụng ly ấm cùng ${livePeer.displayName} — Giữ ấm +8 phút (+12% bước chân)!`
+    );
+    return;
+  }
+
+  if (kind === 'cheer') {
+    playTemporaryEmote('cheer_sunrise', net, 4000);
+    st.triggerSocialSparkle('cheer', midX, midY + 0.18, midZ);
+    net.sendSocialInteract(livePeer.sessionId, 'cheer');
+    if (now - lastSocialChatMs > 2600) {
+      lastSocialChatMs = now;
+      net.sendChat(`Tuyệt vời quá ${livePeer.displayName} ơi, biển mây hôm nay đỉnh thật! 🌅`);
+    }
+    st.showToast(`🙌 Cùng ${livePeer.displayName} reo đón biển mây Đà Lạt!`);
+    return;
+  }
+
+  if (kind === 'photo') {
+    // Invite the peer to wave toward us and frame a flattering 50mm portrait!
+    net.sendSocialInteract(livePeer.sessionId, 'greet');
+    st.triggerSocialSparkle('greet', midX, midY, midZ);
+    if (st.heldItem !== 'film_camera') {
+      st.setHeldItem('film_camera');
+      net.sendHeldItem('film_camera');
+    }
+    st.setPhotoOptions({ photoFocalMm: 50, photoHideCrowd: false });
+    if (Math.hypot(dx, dz) > 0.05) {
+      // Third-person camera looks toward (-sin(cameraYaw), -cos(cameraYaw)), and Photo Mode adds +PI on entry
+      // Wait: lookDir in Photo Mode is (+sin(yaw+PI), -cos(yaw+PI)) = (-sin(yaw), +cos(yaw))!
+      // Let's set cameraYaw so after +PI flip: sin(yaw+PI) = dx/d and -cos(yaw+PI) = dz/d => yaw+PI = atan2(dx, -dz) => yaw = atan2(dx, -dz) - PI!
+      lt.cameraYaw = Math.atan2(dx, -dz) - Math.PI;
+      lt.cameraPitch = 0.04;
+    }
+    st.setPhotoMode(true);
+    st.showToast(`📸 Đã hướng ống kính 50mm về phía ${livePeer.displayName} — Nhấn Space để chụp!`);
+  }
 }
 
 export function triggerGuitarChord(chordIndex: number, net: IMultiplayerController): void {

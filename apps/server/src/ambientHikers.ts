@@ -1,10 +1,13 @@
 import {
+  type BagStyleId,
   type CoatStyleId,
   type EmoteId,
+  type EyewearId,
   type HeadwearId,
   type HeldItemId,
   HIGHLAND_PALETTE,
   type NearPeerTransform,
+  type NeckwearId,
   sampleWalkableHeight,
   TRAIL_SEGMENTS,
 } from '@dalat/protocol';
@@ -24,6 +27,9 @@ export interface AmbientHikerSpec {
   coatColor: string;
   scarfColor: string;
   headwear: HeadwearId;
+  neckwear: NeckwearId;
+  eyewear: EyewearId;
+  bagStyle: BagStyleId;
   hairColor: string;
   backpack: boolean;
   heldItem: HeldItemId;
@@ -45,10 +51,12 @@ export interface AmbientHikerRuntime {
   vx: number;
   vz: number;
   moving: boolean;
+  heldItem: HeldItemId;
   emote: EmoteId;
   waypointIndex: number;
   direction: 1 | -1;
   pauseRemainingSec: number;
+  socialLookYaw?: number;
 }
 
 // Reference TRAIL_SEGMENTS anchor nodes so bots follow the exact authored red-basalt trail network
@@ -65,14 +73,17 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
   {
     sessionId: 'bot-minh-thu',
     displayName: 'Minh Thư',
-    coatStyle: 'wool_trench',
+    coatStyle: 'sherpa_cape',
     coatColor: HIGHLAND_PALETTE.coats[0],
     scarfColor: HIGHLAND_PALETTE.scarves[0],
     headwear: 'beret',
+    neckwear: 'camera_strap',
+    eyewear: 'round_vintage',
+    bagStyle: 'rattan_basket',
     hairColor: HIGHLAND_PALETTE.hair[0],
     backpack: true,
     heldItem: 'film_camera',
-    walkSpeed: 2.25,
+    walkSpeed: 2.95,
     lateralOffset: 0.45,
     pingPong: true,
     initialWaypointIndex: 2,
@@ -87,14 +98,17 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
   {
     sessionId: 'bot-hoang-nam',
     displayName: 'Hoàng Nam',
-    coatStyle: 'puffer_vest',
+    coatStyle: 'quilted_gilet',
     coatColor: HIGHLAND_PALETTE.coats[1],
     scarfColor: HIGHLAND_PALETTE.scarves[2],
-    headwear: 'beanie',
+    headwear: 'fedora_wool',
+    neckwear: 'knit_scarf',
+    eyewear: 'sun_amber',
+    bagStyle: 'trek_pack',
     hairColor: HIGHLAND_PALETTE.hair[1],
     backpack: true,
     heldItem: 'phin_coffee',
-    walkSpeed: 2.4,
+    walkSpeed: 3.15,
     lateralOffset: -0.5,
     pingPong: true,
     initialWaypointIndex: 3,
@@ -111,13 +125,16 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
     sessionId: 'bot-an-nhien',
     displayName: 'An Nhiên',
     coatStyle: 'knit_sweater',
-    coatColor: HIGHLAND_PALETTE.coats[2],
-    scarfColor: HIGHLAND_PALETTE.scarves[5],
-    headwear: 'scarf_only',
+    coatColor: HIGHLAND_PALETTE.coats[8],
+    scarfColor: HIGHLAND_PALETTE.scarves[6],
+    headwear: 'flower_crown',
+    neckwear: 'plaid_shawl',
+    eyewear: 'blush_cheeks',
+    bagStyle: 'canvas_tote',
     hairColor: HIGHLAND_PALETTE.hair[2],
-    backpack: false,
-    heldItem: 'soy_milk',
-    walkSpeed: 2.1,
+    backpack: true,
+    heldItem: 'hydrangea_bouquet',
+    walkSpeed: 2.85,
     lateralOffset: 0.25,
     pingPong: true,
     initialWaypointIndex: 0,
@@ -132,14 +149,17 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
   {
     sessionId: 'bot-bao-khanh',
     displayName: 'Bảo Khánh',
-    coatStyle: 'wool_trench',
+    coatStyle: 'duffle_parka',
     coatColor: HIGHLAND_PALETTE.coats[4],
     scarfColor: HIGHLAND_PALETTE.scarves[1],
     headwear: 'beanie',
+    neckwear: 'bandana',
+    eyewear: 'retro_tortoise',
+    bagStyle: 'guitar_case',
     hairColor: HIGHLAND_PALETTE.hair[4],
     backpack: true,
     heldItem: 'guitar',
-    walkSpeed: 2.35,
+    walkSpeed: 3.05,
     lateralOffset: -0.35,
     pingPong: true,
     initialWaypointIndex: 2,
@@ -154,14 +174,17 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
   {
     sessionId: 'bot-thao-vy',
     displayName: 'Thảo Vy',
-    coatStyle: 'vintage_poncho',
+    coatStyle: 'highland_poncho',
     coatColor: HIGHLAND_PALETTE.coats[3],
     scarfColor: HIGHLAND_PALETTE.scarves[3],
-    headwear: 'beret',
+    headwear: 'straw_boater',
+    neckwear: 'knit_scarf',
+    eyewear: 'rose_tinted',
+    bagStyle: 'leather_satchel',
     hairColor: HIGHLAND_PALETTE.hair[3],
     backpack: true,
-    heldItem: 'lantern',
-    walkSpeed: 2.3,
+    heldItem: 'roasted_corn',
+    walkSpeed: 2.95,
     lateralOffset: 0.0,
     pingPong: false,
     initialWaypointIndex: 0,
@@ -205,6 +228,7 @@ export class AmbientHikerController {
         vx: 0,
         vz: 0,
         moving: false,
+        heldItem: spec.heldItem,
         emote: wp.emote,
         waypointIndex: idx,
         direction: 1,
@@ -255,10 +279,12 @@ export class AmbientHikerController {
 
   /**
    * Advances active hikers by `dtSec` along their highland routes.
-   * Returns a map of sessionId -> new EmoteId ONLY for bots whose emote changed this tick.
+   * Returns updates ONLY for bots whose emote or heldItem changed this tick.
    */
-  public step(dtSec: number): Array<{ sessionId: string; emote: EmoteId }> {
-    const emoteChanges: Array<{ sessionId: string; emote: EmoteId }> = [];
+  public step(
+    dtSec: number
+  ): Array<{ sessionId: string; emote: EmoteId; heldItem: HeldItemId }> {
+    const emoteChanges: Array<{ sessionId: string; emote: EmoteId; heldItem: HeldItemId }> = [];
 
     for (let i = 0; i < this.bots.length; i++) {
       const bot = this.bots[i];
@@ -276,14 +302,25 @@ export class AmbientHikerController {
           bot.vz = 0;
         }
         bot.moving = false;
-        if (targetWp.lookYaw !== undefined) {
-          bot.yaw = lerpAngle(bot.yaw, targetWp.lookYaw, dtSec * 4.5);
+        const desiredLook =
+          bot.socialLookYaw !== undefined ? bot.socialLookYaw : targetWp.lookYaw;
+        if (desiredLook !== undefined) {
+          bot.yaw = lerpAngle(bot.yaw, desiredLook, dtSec * 6.5);
         }
         if (bot.pauseRemainingSec <= 0) {
-          this.advanceTargetIndex(bot);
-          if (bot.emote !== 'none') {
+          const hadSocial = bot.socialLookYaw !== undefined;
+          bot.socialLookYaw = undefined;
+          if (!hadSocial) {
+            this.advanceTargetIndex(bot);
+          }
+          if (bot.emote !== 'none' || bot.heldItem !== bot.spec.heldItem) {
             bot.emote = 'none';
-            emoteChanges.push({ sessionId: bot.spec.sessionId, emote: 'none' });
+            bot.heldItem = bot.spec.heldItem;
+            emoteChanges.push({
+              sessionId: bot.spec.sessionId,
+              emote: 'none',
+              heldItem: bot.heldItem,
+            });
           }
         }
         continue;
@@ -302,7 +339,11 @@ export class AmbientHikerController {
           bot.vz = 0;
           if (bot.emote !== targetWp.emote) {
             bot.emote = targetWp.emote;
-            emoteChanges.push({ sessionId: bot.spec.sessionId, emote: targetWp.emote });
+            emoteChanges.push({
+              sessionId: bot.spec.sessionId,
+              emote: targetWp.emote,
+              heldItem: bot.heldItem,
+            });
           }
         } else {
           this.advanceTargetIndex(bot);
@@ -359,6 +400,61 @@ export class AmbientHikerController {
     } else {
       bot.waypointIndex = (bot.waypointIndex + 1) % count;
     }
+  }
+
+  public reactToSocial(
+    sessionId: string,
+    fromX: number,
+    fromZ: number,
+    fromName: string,
+    kind: 'greet' | 'cheers' | 'cheer'
+  ): {
+    bot: AmbientHikerRuntime;
+    emote: EmoteId;
+    heldItem: HeldItemId;
+    replyText: string;
+  } | null {
+    const bot = this.bots.find((b) => b.active && b.spec.sessionId === sessionId);
+    if (!bot) return null;
+
+    bot.pauseRemainingSec = Math.max(bot.pauseRemainingSec, 4.8);
+    bot.moving = false;
+    bot.vx = 0;
+    bot.vz = 0;
+    bot.socialLookYaw = Math.atan2(fromX - bot.x, fromZ - bot.z);
+
+    if (kind === 'cheers') {
+      bot.emote = 'cheers_cup';
+      if (bot.heldItem !== 'soy_milk' && bot.heldItem !== 'phin_coffee') {
+        bot.heldItem = 'soy_milk';
+      }
+      const cheersReplies = [
+        `Cụng ly ấm nhé ${fromName}! Sáng Cầu Đất se lạnh có ly nóng êm lòng ghê ☕✨`,
+        `1, 2, 3 cụng ly nha ${fromName}! Chúc buổi sớm săn được biển mây vàng rực rỡ 🥛`,
+        `Ấm áp quá ${fromName} ơi! Uống ngụm sữa đậu nành nóng rồi lên Cầu Gỗ ngắm bình minh nhé!`,
+      ];
+      const idx = Math.floor(Math.random() * cheersReplies.length);
+      return { bot, emote: bot.emote, heldItem: bot.heldItem, replyText: cheersReplies[idx] };
+    }
+
+    if (kind === 'cheer') {
+      bot.emote = 'cheer_sunrise';
+      const cheerReplies = [
+        `Tuyệt vời quá ${fromName} ơi! Biển mây Cầu Đất hôm nay đẹp mê hồn 🌅✨`,
+        `Yeahhh! Khoảnh khắc sương tan trên đồi chè đỉnh thật sự ${fromName} ha! 🙌`,
+      ];
+      const idx = Math.floor(Math.random() * cheerReplies.length);
+      return { bot, emote: bot.emote, heldItem: bot.heldItem, replyText: cheerReplies[idx] };
+    }
+
+    bot.emote = 'wave';
+    const greetReplies = [
+      `Chào ${fromName} nha! Bạn cũng dậy sớm đi săn mây Đà Lạt hả 👋✨`,
+      `Xin chào ${fromName}! Không khí thông reo sáng nay trong lành quá chừng 🌲`,
+      `Chào buổi sớm ${fromName} nhé! Chúc một ngày trên đồi thật bình yên ☁️`,
+    ];
+    const idx = Math.floor(Math.random() * greetReplies.length);
+    return { bot, emote: bot.emote, heldItem: bot.heldItem, replyText: greetReplies[idx] };
   }
 
   public toNearTransform(bot: AmbientHikerRuntime): NearPeerTransform {

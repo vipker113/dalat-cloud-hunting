@@ -14,10 +14,11 @@ import {
   Sunrise,
   Users,
 } from 'lucide-react';
-import { EmoteId, gameYToASL, HeldItemId } from '@dalat/protocol';
+import { EmoteId, gameYToASL, HELD_PROP_CATALOG, HeldItemId } from '@dalat/protocol';
 import type { IMultiplayerController } from '../network/types';
 import {
   executeInteractPrompt,
+  executePeerSocialAction,
   HIGHLAND_GUITAR_CHORDS,
   isNearCampfireStage,
   playTemporaryEmote,
@@ -25,16 +26,8 @@ import {
 } from '../gameplay/interactions';
 import { useNetController } from '../gameplay/netBridge';
 import { UIOverlayModal, useGameStore } from '../store/gameStore';
+import { HeldPropThumbnail, VisualChoiceCard } from './GarmentAndPropThumbnail';
 import { GLASS_PILL_STYLE, UI_COLORS, UI_FONTS } from './uiStyles';
-
-const HELD_PROP_OPTIONS: Array<{ id: HeldItemId; label: string; badge: string }> = [
-  { id: 'soy_milk', label: 'Sữa đậu nành nóng', badge: '🥛' },
-  { id: 'phin_coffee', label: 'Phin cà phê', badge: '☕' },
-  { id: 'lantern', label: 'Đèn bão đồng', badge: '🏮' },
-  { id: 'film_camera', label: 'Máy ảnh 35mm', badge: '📷' },
-  { id: 'guitar', label: 'Guitar gỗ thông', badge: '🎸' },
-  { id: 'none', label: 'Thả tay tự do', badge: '✨' },
-];
 
 const EMOTE_OPTIONS: Array<{ id: EmoteId; label: string }> = [
   { id: 'wave', label: '👋 Vẫy chào' },
@@ -65,6 +58,7 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
   const activeEmote = useGameStore((s) => s.activeEmote);
   const activeModal = useGameStore((s) => s.activeModal);
   const nearbyPrompt = useGameStore((s) => s.nearbyPrompt);
+  const nearbyPeer = useGameStore((s) => s.nearbyPeer);
   const toastBanner = useGameStore((s) => s.toastBanner);
   const lastJamNote = useGameStore((s) => s.lastJamNote);
 
@@ -131,6 +125,7 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
         !chatOpen &&
         !emoteTrayOpen &&
         !st.photoModeActive &&
+        !st.nearbyPeer &&
         idleMs >= 4500;
       setStillnessFaded((prev) => (prev !== canFade ? canFade : prev));
     }, 500);
@@ -483,6 +478,91 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
           </div>
         )}
 
+        {/* Quick-Meet Social Interaction Bar when encountering another cloud-hunter */}
+        {nearbyPeer && activeModal === 'none' && !chatOpen && (
+          <div
+            style={{
+              ...GLASS_PILL_STYLE,
+              borderRadius: '20px',
+              padding: '8px 14px',
+              border: '1px solid rgba(243, 195, 130, 0.42)',
+              boxShadow: '0 8px 26px rgba(10, 14, 24, 0.45), 0 0 18px rgba(243, 195, 130, 0.14)',
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'center',
+              gap: '6px',
+              pointerEvents: 'auto',
+              animation: 'dalatFadeUp 200ms ease',
+            }}
+          >
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '11.5px',
+                color: UI_COLORS.mistText,
+              }}
+            >
+              <Users size={12} strokeWidth={2} style={{ color: UI_COLORS.warmAmber }} />
+              <span>Gặp gỡ trên đồi:</span>
+              <span style={{ fontWeight: 600, color: UI_COLORS.warmAmber }}>
+                {nearbyPeer.displayName}
+              </span>
+              <span style={{ opacity: 0.45, fontFamily: UI_FONTS.mono, fontSize: '10.5px' }}>
+                ({nearbyPeer.distance.toFixed(1)}m)
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '6px' }}>
+              {[
+                { kind: 'greet' as const, key: 'G', label: '👋 Chào nhau' },
+                { kind: 'cheers' as const, key: 'H', label: '☕ Cụng ly ấm' },
+                { kind: 'cheer' as const, key: 'V', label: '🙌 Reo vui' },
+                { kind: 'photo' as const, key: 'C', label: '📸 Chụp chung' },
+              ].map((btn) => (
+                <button
+                  key={btn.kind}
+                  type="button"
+                  onClick={() => executePeerSocialAction(btn.kind, nearbyPeer, net)}
+                  className="dalat-glass-btn"
+                  style={{
+                    padding: '5px 11px',
+                    borderRadius: '999px',
+                    background:
+                      btn.kind === 'cheers'
+                        ? 'rgba(243, 195, 130, 0.2)'
+                        : 'rgba(255, 255, 255, 0.06)',
+                    border: `1px solid ${
+                      btn.kind === 'cheers' ? 'rgba(243, 195, 130, 0.48)' : UI_COLORS.border
+                    }`,
+                    color: UI_COLORS.cream,
+                    fontSize: '11.5px',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                  }}
+                >
+                  <span
+                    style={{
+                      fontFamily: UI_FONTS.mono,
+                      fontSize: '10px',
+                      padding: '1px 5px',
+                      borderRadius: '5px',
+                      background: 'rgba(243, 195, 130, 0.2)',
+                      color: UI_COLORS.warmAmber,
+                      fontWeight: 600,
+                    }}
+                  >
+                    {btn.key}
+                  </span>
+                  <span>{btn.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Context-Aware Soft Glowing Proximity Interaction Pill [E] */}
         {nearbyPrompt && activeModal === 'none' && !chatOpen && (
           <button
@@ -555,40 +635,26 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
             <div
               style={{
                 display: 'grid',
-                gridTemplateColumns: 'repeat(3, 1fr)',
+                gridTemplateColumns: 'repeat(4, 1fr)',
                 gap: '6px',
                 marginBottom: '12px',
+                maxHeight: '210px',
+                overflowY: 'auto',
+                paddingRight: '2px',
               }}
             >
-              {HELD_PROP_OPTIONS.map((p) => {
-                const selected = heldItem === p.id;
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => selectProp(p.id)}
-                    className="dalat-glass-btn"
-                    style={{
-                      padding: '7px 8px',
-                      borderRadius: '11px',
-                      background: selected
-                        ? 'rgba(243, 195, 130, 0.24)'
-                        : 'rgba(255, 255, 255, 0.04)',
-                      border: `1px solid ${selected ? UI_COLORS.warmAmber : UI_COLORS.border}`,
-                      color: UI_COLORS.cream,
-                      fontSize: '11.5px',
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                    }}
-                  >
-                    <span>{p.badge}</span>
-                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {p.label}
-                    </span>
-                  </button>
-                );
-              })}
+              {HELD_PROP_CATALOG.map((p) => (
+                <VisualChoiceCard
+                  key={p.id}
+                  active={heldItem === p.id}
+                  label={p.shortLabel}
+                  title={`${p.title} — ${p.desc}`}
+                  compact
+                  thumbHeight={44}
+                  onClick={() => selectProp(p.id)}
+                  thumbnail={<HeldPropThumbnail itemId={p.id} size={42} />}
+                />
+              ))}
             </div>
 
             <div
@@ -680,7 +746,8 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
           </form>
         )}
 
-        {/* Bottom-Center Floating Glass Dock */}
+        {/* Bottom-Center Floating Glass Dock (hidden during full-stage Wardrobe preview) */}
+        {activeModal !== 'wardrobe' && (
         <div
           style={{
             ...GLASS_PILL_STYLE,
@@ -749,7 +816,8 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
           <DockIconButton
             icon={<Shirt size={16} strokeWidth={1.75} />}
             label="Tủ đồ Áo ấm"
-            active={activeModal === 'wardrobe'}
+            shortcut="O"
+            active={false}
             onClick={() => toggleModal('wardrobe')}
           />
           <DockIconButton
@@ -771,6 +839,7 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
             onClick={() => toggleModal('settings')}
           />
         </div>
+        )}
       </div>
     </div>
   );

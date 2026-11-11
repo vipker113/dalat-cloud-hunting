@@ -279,7 +279,8 @@ export function captureAndComposePolaroid(params: {
 
   const lm = findNearestLandmark(playerX, playerZ);
   const altitudeASL = gameYToASL(playerY);
-  const weatherFull = WEATHER_LABELS[atmosphere.weather] || atmosphere.weatherLabel;
+  const weatherFull =
+    WEATHER_LABELS[atmosphere.weather] || atmosphere.weatherLabel || 'Biển Mây Sương Sớm';
   const weatherShort = weatherFull.replace(' Bình Minh', '');
 
   lastGradedFrameCanvas = photoCanvas;

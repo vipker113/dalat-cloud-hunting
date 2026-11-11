@@ -8,12 +8,19 @@ import {
   fbm2D,
   getSurfaceType,
   sampleGroundHeight,
+  SHARED_BENCHES,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
 import { useGameStore } from '../store/gameStore';
 import { worldColliderRegistry } from './colliderRegistry';
+import {
+  getDeterministicPinesAndLanterns,
+  isInsideStiltedDeckFootprint,
+  seededHash,
+  TURBINE_PEDESTALS,
+} from './worldScatterDeterministic';
 
-const TERRAIN_SEGMENTS = 160;
+const TERRAIN_SEGMENTS = 256;
 const WORLD_SPAN = WORLD_CONSTANTS.HALF_SIZE * 2; // 900m [-450, 450]
 
 function clamp(v: number, min: number, max: number): number {
@@ -45,57 +52,335 @@ function toPositionOnlyGeometry(src: THREE.BufferGeometry): THREE.BufferGeometry
 }
 
 /**
- * Builds the exact walkable collider geometry for Cầu Gỗ Săn Mây (x: 50..99, z: -75, rising 196.15 -> 198.25)
- * and Tiệm Cà Phê Mơ Sương stilted veranda deck (x: -51.5..-23, z: 19..41, y: 135.15).
+ * Builds the exact walkable collider geometry for Cầu Gỗ Săn Mây (x: 50..97.8, z: -75, ramp + flat 198.28m sunrise deck),
+ * Tiệm Cà Phê Mơ Sương stilted veranda deck (x: -51.8..-23, z: 19..41, y: 135.15),
+ * and Gác Chè Cổ 1927 timber pavilion platform.
  */
 function createWalkableDeckColliders(): THREE.BufferGeometry[] {
-  // 1. Cầu Gỗ Săn Mây inclined wooden bridge corridor: x in [50, 86.5], z in [-77.7, -72.3]
-  const bridgeLen = 36.5;
+  // 1. Cầu Gỗ Săn Mây inclined wooden bridge corridor: x in [50, 85.2], z in [-77.7, -72.3]
+  const bridgeLen = 35.2;
   const bridgeWidth = 5.4;
   const bridgeThickness = 0.5;
-  const bridgeBox = new THREE.BoxGeometry(bridgeLen, bridgeThickness, bridgeWidth, 20, 1, 2);
+  const bridgeBox = new THREE.BoxGeometry(bridgeLen, bridgeThickness, bridgeWidth, 28, 1, 2);
   bridgeBox.translate(50 + bridgeLen * 0.5, -bridgeThickness * 0.5, -75);
 
   const bPos = bridgeBox.getAttribute('position') as THREE.BufferAttribute;
   for (let i = 0; i < bPos.count; i++) {
     const wx = bPos.getX(i);
     const localY = bPos.getY(i); // 0 on top face, -0.5 on bottom face
-    const t = clamp((wx - 50) / 41, 0, 1);
-    const surfaceY = 196.15 + t * 2.1;
+    const rampY = 196.15 + clamp(wx - 52, 0, 32.5) * 0.0525;
+    const deckBlend = smoothstep(83.2, 84.6, wx);
+    const surfaceY = rampY * (1 - deckBlend) + 198.28 * deckBlend;
     bPos.setY(i, surfaceY + localY);
   }
 
-  // 2. Cầu Gỗ Săn Mây circular sunrise deck centered at (91, -75) radius 7.35m (reaches x ~ 98.35m)
-  const roundDeck = new THREE.CylinderGeometry(7.35, 7.35, bridgeThickness, 28, 1);
-  roundDeck.translate(91, -bridgeThickness * 0.5, -75);
+  // 2. Cầu Gỗ Săn Mây flat circular sunrise deck centered at (91, -75), radius 6.75m, exact plank top y = 198.28m
+  const roundDeck = new THREE.CylinderGeometry(6.75, 6.75, bridgeThickness, 32, 1);
+  roundDeck.translate(91, 198.28 - bridgeThickness * 0.5, -75);
 
-  const dPos = roundDeck.getAttribute('position') as THREE.BufferAttribute;
-  for (let i = 0; i < dPos.count; i++) {
-    const wx = dPos.getX(i);
-    const localY = dPos.getY(i);
-    const t = clamp((wx - 50) / 41, 0, 1);
-    const surfaceY = 196.15 + t * 2.1;
-    dPos.setY(i, surfaceY + localY);
-  }
-
-  // 3. Tiệm Cà Phê Mơ Sương stilted veranda deck: x in [-51.5, -23], z in [19, 41], top y = 135.15
-  const cafeWidthX = -23 - -51.5; // 28.5m
-  const cafeDepthZ = 41 - 19; // 22m
+  // 3. Tiệm Cà Phê Mơ Sương stilted veranda deck: x in [-51.85, -24.15], z in [19.65, 40.35], exact plank top y = 135.307m
+  const cafeWidthX = -24.15 - -51.85; // 27.7m
+  const cafeDepthZ = 40.35 - 19.65; // 20.7m
   const cafeThickness = 0.8;
   const cafeDeck = new THREE.BoxGeometry(cafeWidthX, cafeThickness, cafeDepthZ, 4, 1, 4);
-  cafeDeck.translate(-37.25, 135.15 - cafeThickness * 0.5, 30);
+  cafeDeck.translate(-38.0, 135.307 - cafeThickness * 0.5, 30);
+
+  // 4. Gác Chè Cổ 1927 weathered timber pavilion platform at [-21, gacCheY, -181] (4.2 x 0.5 x 3.6, yaw 0.65)
+  const gacCheGroundY = sampleGroundHeight(-21, -181);
+  const gacCheDeck = new THREE.BoxGeometry(4.2, 0.5, 3.6);
+  gacCheDeck.rotateY(0.65);
+  gacCheDeck.translate(-21, gacCheGroundY + 0.25, -181);
 
   const out = [
     toPositionOnlyGeometry(bridgeBox),
     toPositionOnlyGeometry(roundDeck),
     toPositionOnlyGeometry(cafeDeck),
+    toPositionOnlyGeometry(gacCheDeck),
   ];
 
   bridgeBox.dispose();
   roundDeck.dispose();
   cafeDeck.dispose();
+  gacCheDeck.dispose();
 
   return out;
+}
+
+/**
+ * Open-ended 4-wall vertical prism (zero top/bottom caps -> normal.y === 0 everywhere,
+ * so downward floor raycasts never step onto walls, railings, cabins, benches, or tables!).
+ */
+function makeOpenWallPrism(
+  width: number,
+  height: number,
+  depth: number,
+  cx: number,
+  bottomY: number,
+  cz: number,
+  yaw = 0
+): THREE.BufferGeometry {
+  const hw = width * 0.5;
+  const hd = depth * 0.5;
+  const positions = new Float32Array([
+    -hw, 0, -hd,
+     hw, 0, -hd,
+     hw, 0,  hd,
+    -hw, 0,  hd,
+    -hw, height, -hd,
+     hw, height, -hd,
+     hw, height,  hd,
+    -hw, height,  hd,
+  ]);
+  const indices = new Uint16Array([
+    1, 0, 4,  1, 4, 5, // North (-Z)
+    2, 1, 5,  2, 5, 6, // East (+X)
+    3, 2, 6,  3, 6, 7, // South (+Z)
+    0, 3, 7,  0, 7, 4, // West (-X)
+  ]);
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geo.setIndex(new THREE.BufferAttribute(indices, 1));
+  if (yaw !== 0) {
+    geo.rotateY(yaw);
+  }
+  geo.translate(cx, bottomY, cz);
+  return geo;
+}
+
+function makeWallSegment2D(
+  ax: number,
+  az: number,
+  bx: number,
+  bz: number,
+  bottomY: number,
+  height: number,
+  thickness = 0.34
+): THREE.BufferGeometry {
+  const dx = bx - ax;
+  const dz = bz - az;
+  const len = Math.hypot(dx, dz) || 0.1;
+  const yaw = Math.atan2(-dz, dx);
+  return makeOpenWallPrism(len + 0.08, height, thickness, (ax + bx) * 0.5, bottomY, (az + bz) * 0.5, yaw);
+}
+
+function makeOpenCylinderCollider(
+  radius: number,
+  height: number,
+  cx: number,
+  bottomY: number,
+  cz: number,
+  radialSegments = 8
+): THREE.BufferGeometry {
+  const cyl = new THREE.CylinderGeometry(radius, radius, height, radialSegments, 1, true);
+  cyl.translate(cx, bottomY + height * 0.5, cz);
+  const out = toPositionOnlyGeometry(cyl);
+  cyl.dispose();
+  return out;
+}
+
+/**
+ * Watertight solid obstacle colliders for all buildings, railings, tables, benches,
+ * campfire stones, Vintage Super Cub 50, pavilion pillars, support stilts, wind turbines,
+ * trail lanterns, greenhouses & highland pine trunks!
+ */
+function createObstacleWallAndPropColliders(): THREE.BufferGeometry[] {
+  const obs: THREE.BufferGeometry[] = [];
+
+  // 1. Tiệm Cà Phê Gỗ "Mơ Sương" (origin [-38, 135.15, 30])
+  // Main A-frame wooden cabin body + front espresso service counter
+  obs.push(makeOpenWallPrism(9.1, 5.8, 12.75, -45.6, 134.8, 29.95));
+  obs.push(makeOpenWallPrism(1.6, 2.0, 4.5, -40.35, 135.0, 30.0));
+
+  // Veranda wooden railings along North (z=20.05), South (z=39.95), and East cliff edge (x=-24.42)
+  obs.push(makeWallSegment2D(-41.55, 20.05, -24.3, 20.05, 135.0, 1.75, 0.36));
+  obs.push(makeWallSegment2D(-41.55, 39.95, -24.3, 39.95, 135.0, 1.75, 0.36));
+  obs.push(makeWallSegment2D(-24.42, 19.95, -24.42, 40.05, 135.0, 1.75, 0.36));
+
+  // Veranda string-light timber poles & 3 bistro table sets
+  obs.push(makeOpenCylinderCollider(0.24, 4.0, -26.5, 135.0, 24.5, 8));
+  obs.push(makeOpenCylinderCollider(0.24, 4.0, -26.5, 135.0, 35.5, 8));
+  obs.push(makeOpenCylinderCollider(0.74, 1.45, -32.5, 135.0, 35.0, 10));
+  obs.push(makeOpenCylinderCollider(0.74, 1.45, -32.5, 135.0, 25.5, 10));
+  obs.push(makeOpenCylinderCollider(0.74, 1.45, -28.5, 135.0, 30.0, 10));
+
+  // Under-veranda timber support stilts
+  for (const sx of [-50.5, -42.0, -33.0, -25.0]) {
+    for (const sz of [20.5, 30.0, 39.5]) {
+      const gy = sampleGroundHeight(sx, sz);
+      const h = Math.max(0.8, 135.06 - gy + 0.4);
+      obs.push(makeOpenCylinderCollider(0.2, h, sx, gy - 0.3, sz, 6));
+    }
+  }
+
+  // 2. Cầu Gỗ Săn Mây (ramp x=51.8..85.4, z=-75 ± 2.32 + circular sunrise deck at (91, -75) r=6.68m)
+  const rampSegs = 6;
+  for (let s = 0; s < rampSegs; s++) {
+    const x0 = 51.8 + (33.6 * s) / rampSegs;
+    const x1 = 51.8 + (33.6 * (s + 1)) / rampSegs;
+    const xm = (x0 + x1) * 0.5;
+    const baseY = 195.85 + clamp(xm - 52, 0, 32.5) * 0.0525;
+    obs.push(makeWallSegment2D(x0, -77.34, x1, -77.34, baseY, 2.05, 0.36));
+    obs.push(makeWallSegment2D(x0, -72.66, x1, -72.66, baseY, 2.05, 0.36));
+  }
+
+  // Circular sunrise deck perimeter railing (28 segments, leaving only West ramp entrance open!)
+  const ringSegs = 28;
+  const deckR = 6.68;
+  for (let k = 0; k < ringSegs; k++) {
+    const a0 = (k / ringSegs) * Math.PI * 2;
+    const a1 = ((k + 1) / ringSegs) * Math.PI * 2;
+    const am = (a0 + a1) * 0.5;
+    const mx = 91.0 + Math.cos(am) * deckR;
+    const mz = -75.0 + Math.sin(am) * deckR;
+    // Leave West bridge corridor mouth open
+    if (mx < 85.7 && Math.abs(mz - -75.0) < 2.28) continue;
+    obs.push(
+      makeWallSegment2D(
+        91.0 + Math.cos(a0) * deckR,
+        -75.0 + Math.sin(a0) * deckR,
+        91.0 + Math.cos(a1) * deckR,
+        -75.0 + Math.sin(a1) * deckR,
+        198.0,
+        1.85,
+        0.36
+      )
+    );
+  }
+  // Wooden check-in signboard on circular sunrise deck
+  obs.push(makeOpenWallPrism(0.8, 2.5, 1.7, 96.2, 198.05, -78.3));
+
+  // Under-bridge timber support stilts
+  for (const bx of [58, 66, 74, 82, 91, 96]) {
+    const zOffsets = bx >= 88 ? [-4.6, 4.6] : [-2.1, 2.1];
+    for (const dz of zOffsets) {
+      const bz = -75 + dz;
+      const gy = sampleGroundHeight(bx, bz);
+      const topY = bx >= 85 ? 198.08 : 196.0 + Math.max(0, bx - 52) * 0.0525;
+      obs.push(makeOpenCylinderCollider(0.2, Math.max(1.2, topY - gy + 0.5), bx, gy - 0.3, bz, 6));
+    }
+  }
+
+  // 3. Gác Chè Cổ 1927 timber pavilion 4 corner columns at [-21, gacCheGroundY, -181] (yaw 0.65)
+  const gacCheY = sampleGroundHeight(-21, -181);
+  const cosG = Math.cos(0.65);
+  const sinG = Math.sin(0.65);
+  for (const [lx, lz] of [
+    [-1.75, -1.45],
+    [1.75, -1.45],
+    [-1.75, 1.45],
+    [1.75, 1.45],
+  ] as const) {
+    const wx = -21 + lx * cosG + lz * sinG;
+    const wz = -181 - lx * sinG + lz * cosG;
+    obs.push(makeOpenWallPrism(0.32, 2.7, 0.32, wx, gacCheY + 0.2, wz, 0.65));
+  }
+
+  // 4. Campfire Stone Pit, Vintage Super Cub 50, Lonely Pine Hero Trunk & 5 Wind Turbine Towers
+  obs.push(makeOpenCylinderCollider(1.16, 1.45, -53.0, 134.95, 24.0, 10));
+  obs.push(
+    makeOpenWallPrism(1.92, 1.45, 0.78, 19.8, sampleGroundHeight(19.8, 125.2) - 0.15, 125.2, -0.68)
+  );
+  obs.push(
+    makeOpenCylinderCollider(0.84, 6.8, -95.0, sampleGroundHeight(-95, -155) - 0.5, -155.0, 10)
+  );
+  for (const [tx, tz] of TURBINE_PEDESTALS) {
+    obs.push(makeOpenCylinderCollider(6.2, 18.0, tx, sampleGroundHeight(tx, tz) - 1.0, tz, 12));
+  }
+
+  // 5. All Shared Wooden Benches (players still sit smoothly via [E], blocked from walking through!)
+  for (const b of SHARED_BENCHES) {
+    obs.push(makeOpenWallPrism(1.82, 1.2, 0.64, b.position[0], b.position[1] - 0.1, b.position[2], b.yaw));
+  }
+
+  // 6. All ~460 Highland Pine Tree Trunks & Trail Lantern Posts
+  const { pines, lanterns } = getDeterministicPinesAndLanterns();
+  for (const p of pines) {
+    obs.push(makeOpenCylinderCollider(0.42 * p.scaleXZ, 4.2, p.x, p.y - 0.25, p.z, 7));
+  }
+  for (const lp of lanterns) {
+    obs.push(makeOpenCylinderCollider(0.22, 2.85, lp.x, lp.y - 0.1, lp.z, 6));
+  }
+
+  // 6b. Trailside Mossy Boulders (synced 1:1 with HighlandFoliageAndProps deterministic scatter)
+  let fernCount = 0;
+  let shrubCount = 0;
+  let mossRockCount = 0;
+  for (let i = 0; i < 2200 && fernCount < 160; i++) {
+    const fx = (seededHash(i * 6.13 + 71) - 0.5) * 420;
+    const fz = (seededHash(i * 9.47 + 19) - 0.5) * 420;
+    const dTrail = distanceToTrail(fx, fz);
+    if (dTrail < 3.4 || dTrail > 26) continue;
+    if (isInsideStiltedDeckFootprint(fx, fz)) continue;
+    if (fx >= -56 && fx <= -20 && fz >= 16 && fz <= 43) continue;
+    const fy = sampleGroundHeight(fx, fz);
+    if (fy < 88) continue;
+
+    const gx = (sampleGroundHeight(fx + 0.8, fz) - sampleGroundHeight(fx - 0.8, fz)) / 1.6;
+    const gz = (sampleGroundHeight(fx, fz + 0.8) - sampleGroundHeight(fx, fz - 0.8)) / 1.6;
+    if (Math.hypot(gx, gz) > 0.62) continue;
+
+    if (i % 3 === 0 && shrubCount < 110) {
+      shrubCount++;
+    } else {
+      fernCount++;
+    }
+
+    if (i % 5 === 0 && mossRockCount < 85 && dTrail > 4.6) {
+      const rkSc = 1.1 + seededHash(i * 31.1) * 1.65;
+      const rx = fx + 1.1;
+      obs.push(
+        makeOpenCylinderCollider(
+          0.54 * rkSc,
+          1.35 * rkSc,
+          rx,
+          sampleGroundHeight(rx, fz) - 0.35,
+          fz,
+          7
+        )
+      );
+      mossRockCount++;
+    }
+  }
+
+  // 6c. Cầu Đất Contour Tea Hedge Rows (aisles between rings stay open for strolling; solid bushes block!)
+  let teaCount = 0;
+  for (let ring = 0; ring < 14 && teaCount < 380; ring++) {
+    const radius = 14 + ring * 3.7;
+    const segCount = Math.floor((2 * Math.PI * radius) / 2.65);
+    for (let s = 0; s < segCount && teaCount < 380; s++) {
+      const angle = (s / segCount) * Math.PI * 2 + ring * 0.19;
+      const hx = 36 + Math.cos(angle) * radius;
+      const hz = -58 + Math.sin(angle) * radius * 0.95;
+      if (distanceToTrail(hx, hz) < 4.7) continue;
+      if (Math.hypot(hx - 52, hz - -75) < 15.5) continue;
+      const hy = sampleGroundHeight(hx, hz);
+      const gx = sampleGroundHeight(hx + 1.2, hz) - sampleGroundHeight(hx - 1.2, hz);
+      const gz = sampleGroundHeight(hx, hz + 1.2) - sampleGroundHeight(hx, hz - 1.2);
+      const contourYaw = Math.atan2(gx, -gz);
+      obs.push(makeOpenWallPrism(2.48, 1.15, 1.12, hx, hy - 0.25, hz, contourYaw));
+      teaCount++;
+    }
+  }
+
+  // 7. Thung Lũng Đèn Valley Greenhouses
+  let ghCount = 0;
+  for (let gx = 148; gx <= 378 && ghCount < 160; gx += 16.5) {
+    for (let gz = -42; gz <= 228 && ghCount < 160; gz += 19.5) {
+      const jx = gx + (seededHash(gx * 13 + gz * 7) - 0.5) * 5.0;
+      const jz = gz + (seededHash(gx * 19 + gz * 11) - 0.5) * 5.0;
+      if (jx < 145 || jx > 380 || jz < -45 || jz > 230) continue;
+      const gy = sampleGroundHeight(jx, jz);
+      if (gy > 66) continue;
+      if (seededHash(gx * 31 + gz * 17) < 0.08) continue;
+      const yaw = 0.12 + (seededHash(gx * 7 + gz * 23) - 0.5) * 0.18;
+      const sc = 0.86 + seededHash(gx * 41 + gz * 3) * 0.34;
+      const scZ = sc * (0.9 + seededHash(gx + gz) * 0.25);
+      obs.push(makeOpenWallPrism(5.6 * sc, 2.8 * sc, 11.4 * scZ, jx, gy - 0.5, jz, yaw));
+      ghCount++;
+    }
+  }
+
+  return obs;
 }
 
 interface TerrainShaderUniforms {
@@ -105,6 +390,19 @@ interface TerrainShaderUniforms {
   uSnowGrassColor: { value: THREE.Color };
   uRosePinkColor: { value: THREE.Color };
   uDayPinkMeadowColor: { value: THREE.Color };
+  uBasaltDiff: { value: THREE.Texture };
+  uBasaltNor: { value: THREE.Texture };
+  uForestDiff: { value: THREE.Texture };
+  uForestNor: { value: THREE.Texture };
+}
+
+function make1x1FallbackTex(r: number, g: number, b: number, srgb: boolean): THREE.DataTexture {
+  const tex = new THREE.DataTexture(new Uint8Array([r, g, b, 255]), 1, 1, THREE.RGBAFormat);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  tex.needsUpdate = true;
+  return tex;
 }
 
 export function DaLatWorldTerrain() {
@@ -214,13 +512,18 @@ export function DaLatWorldTerrain() {
     geo.computeBoundingBox();
     geo.computeBoundingSphere();
 
-    // 2. Build combined walkable MeshBVH collider (Terrain + Cầu Gỗ Săn Mây + Mơ Sương Veranda)
+    // 2. Build combined walkable + solid obstacle MeshBVH collider (Terrain + Decks + Walls/Railings/Props/Trees)
     const terrainPosGeo = toPositionOnlyGeometry(geo);
     const deckGeos = createWalkableDeckColliders();
-    const mergedColliderGeo = mergeGeometries([terrainPosGeo, ...deckGeos], false);
+    const obstacleGeos = createObstacleWallAndPropColliders();
+    const mergedColliderGeo = mergeGeometries(
+      [terrainPosGeo, ...deckGeos, ...obstacleGeos],
+      false
+    );
 
     terrainPosGeo.dispose();
     for (const dg of deckGeos) dg.dispose();
+    for (const og of obstacleGeos) og.dispose();
 
     const builtBvh = new MeshBVH(mergedColliderGeo, { maxLeafSize: 12 });
     (mergedColliderGeo as unknown as { boundsTree: MeshBVH }).boundsTree = builtBvh;
@@ -248,9 +551,58 @@ export function DaLatWorldTerrain() {
       uSnowGrassColor: { value: new THREE.Color('#DCE8F2') },
       uRosePinkColor: { value: new THREE.Color('#F28DB2') },
       uDayPinkMeadowColor: { value: new THREE.Color('#C88BA6') },
+      uBasaltDiff: { value: make1x1FallbackTex(160, 102, 78, true) },
+      uBasaltNor: { value: make1x1FallbackTex(128, 128, 255, false) },
+      uForestDiff: { value: make1x1FallbackTex(96, 122, 88, true) },
+      uForestNor: { value: make1x1FallbackTex(128, 128, 255, false) },
     }),
     []
   );
+
+  // Stream compact 512x512 WebP Poly Haven PBR ground detail maps seamlessly
+  useEffect(() => {
+    let cancelled = false;
+    const loader = new THREE.TextureLoader();
+    const loaded: THREE.Texture[] = [];
+
+    const loadMap = (
+      url: string,
+      srgb: boolean,
+      assign: (tex: THREE.Texture) => void
+    ) => {
+      loader.load(url, (tex) => {
+        if (cancelled) {
+          tex.dispose();
+          return;
+        }
+        tex.wrapS = THREE.RepeatWrapping;
+        tex.wrapT = THREE.RepeatWrapping;
+        tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+        tex.anisotropy = 8;
+        tex.needsUpdate = true;
+        loaded.push(tex);
+        assign(tex);
+      });
+    };
+
+    loadMap('/assets/textures/basalt_diff.webp', true, (t) => {
+      shaderUniforms.uBasaltDiff.value = t;
+    });
+    loadMap('/assets/textures/basalt_nor.webp', false, (t) => {
+      shaderUniforms.uBasaltNor.value = t;
+    });
+    loadMap('/assets/textures/forest_diff.webp', true, (t) => {
+      shaderUniforms.uForestDiff.value = t;
+    });
+    loadMap('/assets/textures/forest_nor.webp', false, (t) => {
+      shaderUniforms.uForestNor.value = t;
+    });
+
+    return () => {
+      cancelled = true;
+      for (const t of loaded) t.dispose();
+    };
+  }, [shaderUniforms]);
 
   const terrainMaterial = useMemo(() => {
     const mat = new THREE.MeshStandardMaterial({
@@ -266,6 +618,10 @@ export function DaLatWorldTerrain() {
       shader.uniforms.uSnowGrassColor = shaderUniforms.uSnowGrassColor;
       shader.uniforms.uRosePinkColor = shaderUniforms.uRosePinkColor;
       shader.uniforms.uDayPinkMeadowColor = shaderUniforms.uDayPinkMeadowColor;
+      shader.uniforms.uBasaltDiff = shaderUniforms.uBasaltDiff;
+      shader.uniforms.uBasaltNor = shaderUniforms.uBasaltNor;
+      shader.uniforms.uForestDiff = shaderUniforms.uForestDiff;
+      shader.uniforms.uForestNor = shaderUniforms.uForestNor;
 
       shader.vertexShader = shader.vertexShader
         .replace(
@@ -297,6 +653,10 @@ export function DaLatWorldTerrain() {
           uniform vec3 uSnowGrassColor;
           uniform vec3 uRosePinkColor;
           uniform vec3 uDayPinkMeadowColor;
+          uniform sampler2D uBasaltDiff;
+          uniform sampler2D uBasaltNor;
+          uniform sampler2D uForestDiff;
+          uniform sampler2D uForestNor;
           varying vec4 vSurfaceWeights;
           varying vec3 vTerrainWorldPos;
 
@@ -319,10 +679,27 @@ export function DaLatWorldTerrain() {
           float trailW = vSurfaceWeights.x;
           float pinkW = vSurfaceWeights.y;
           float teaW = vSurfaceWeights.z;
+          float pbrNearFade = 1.0 - smoothstep(28.0, 105.0, length(vViewPosition));
+
+          // Dual-scale Poly Haven PBR micro-albedo (forest needles & red-basalt laterite pebbles!)
+          if (pbrNearFade > 0.01) {
+            vec2 uvFine = vTerrainWorldPos.xz * 0.36;
+            vec2 uvMacro = vTerrainWorldPos.xz * 0.095 + vec2(0.37, 0.61);
+            vec3 forestSample = mix(texture2D(uForestDiff, uvFine).rgb, texture2D(uForestDiff, uvMacro).rgb, 0.35);
+            vec3 basaltSample = mix(texture2D(uBasaltDiff, uvFine * 1.15).rgb, texture2D(uBasaltDiff, uvMacro).rgb, 0.32);
+
+            float forestLum = clamp(dot(forestSample, vec3(0.333)) * 2.35, 0.78, 1.24);
+            diffuseColor.rgb *= mix(1.0, forestLum, (1.0 - trailW) * pbrNearFade * 0.58);
+
+            if (trailW > 0.01) {
+              vec3 richTrail = mix(diffuseColor.rgb, basaltSample * 1.12, 0.46);
+              diffuseColor.rgb = mix(diffuseColor.rgb, richTrail, trailW * pbrNearFade);
+            }
+          }
 
           // Subtle painterly micro-grain across grass, tea contours & basalt clay
           float micro = terrainGrain(vTerrainWorldPos.xz * 1.35);
-          diffuseColor.rgb *= (0.93 + 0.14 * micro);
+          diffuseColor.rgb *= (0.94 + 0.12 * micro);
 
           // Crisp Cầu Đất tea terrace contour stripe accent
           if (teaW > 0.01) {
@@ -341,8 +718,26 @@ export function DaLatWorldTerrain() {
           // Red-Basalt clay trail darkens richly when wet from Highland Drizzle
           if (trailW > 0.01 && uDrizzle > 0.01) {
             float puddlePatch = smoothstep(0.42, 0.78, terrainGrain(vTerrainWorldPos.xz * 0.55));
-            float wetDarken = mix(1.0, 0.58 - 0.12 * puddlePatch, trailW * uDrizzle);
+            float wetDarken = mix(1.0, 0.56 - 0.14 * puddlePatch, trailW * uDrizzle);
             diffuseColor.rgb *= wetDarken;
+          }
+          `
+        )
+        .replace(
+          '#include <normal_fragment_maps>',
+          /* glsl */ `
+          #include <normal_fragment_maps>
+          float nNear = 1.0 - smoothstep(24.0, 88.0, length(vViewPosition));
+          if (nNear > 0.01) {
+            vec2 nUv = vTerrainWorldPos.xz * 0.36;
+            vec3 fNor = texture2D(uForestNor, nUv).xyz * 2.0 - 1.0;
+            vec3 bNor = texture2D(uBasaltNor, nUv * 1.15).xyz * 2.0 - 1.0;
+            vec2 xzSlope = mix(fNor.xy * 0.42, bNor.xy * 0.68, vSurfaceWeights.x) * nNear;
+            // Dampen pebble micro-normals inside smooth water puddles during drizzle
+            float puddleFlatten = 1.0 - vSurfaceWeights.x * uDrizzle * 0.55;
+            vec3 worldPerturb = vec3(xzSlope.x, 0.0, xzSlope.y) * puddleFlatten;
+            vec3 viewPerturb = (viewMatrix * vec4(worldPerturb, 0.0)).xyz;
+            normal = normalize(normal + viewPerturb);
           }
           `
         )
@@ -350,15 +745,16 @@ export function DaLatWorldTerrain() {
           '#include <roughnessmap_fragment>',
           /* glsl */ `
           #include <roughnessmap_fragment>
-          // Wet red-basalt clay & morning dew shimmer reduce surface roughness gracefully
-          float wetTrailSheen = vSurfaceWeights.x * uDrizzle * 0.56;
-          float morningDewSheen = vSurfaceWeights.w * (1.0 - uPinkDayFade) * 0.12;
-          roughnessFactor = clamp(roughnessFactor - wetTrailSheen - morningDewSheen, 0.24, 0.96);
+          // Wet red-basalt clay puddles & morning dew shimmer reduce surface roughness for live sky reflections!
+          float puddleMask = smoothstep(0.44, 0.76, terrainGrain(vTerrainWorldPos.xz * 0.55));
+          float wetTrailSheen = vSurfaceWeights.x * uDrizzle * (0.42 + 0.34 * puddleMask);
+          float morningDewSheen = vSurfaceWeights.w * (1.0 - uPinkDayFade) * 0.14;
+          roughnessFactor = clamp(roughnessFactor - wetTrailSheen - morningDewSheen, 0.16, 0.95);
           `
         );
     };
 
-    mat.customProgramCacheKey = () => 'dalat-painterly-terrain-v1';
+    mat.customProgramCacheKey = () => 'dalat-painterly-pbr-terrain-v2';
     return mat;
   }, [shaderUniforms]);
 

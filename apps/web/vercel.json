@@ -1,0 +1,12 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
+  "buildCommand": "cd ../.. && bun install && bun run --cwd apps/web build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/((?!assets/|models/|audio/|textures/|draco/).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

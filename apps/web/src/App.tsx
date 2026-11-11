@@ -29,7 +29,7 @@ export function App() {
     };
   }, []);
 
-  const maxDpr = qualityTier === 'mobile' ? 1.35 : qualityTier === 'medium' ? 1.5 : 2.0;
+  const maxDpr = qualityTier === 'mobile' ? 1.0 : qualityTier === 'medium' ? 1.15 : 1.35;
 
   return (
     <div style={{ width: '100vw', height: '100vh', position: 'relative', overflow: 'hidden' }}>
@@ -41,12 +41,12 @@ export function App() {
           antialias: qualityTier !== 'mobile',
           powerPreference: 'high-performance',
           preserveDrawingBuffer: true,
-          toneMapping: THREE.ACESFilmicToneMapping,
+          toneMapping: THREE.AgXToneMapping,
           toneMappingExposure: 1.08,
         }}
         onCreated={({ gl }) => {
           gl.shadowMap.enabled = true;
-          gl.shadowMap.type = THREE.PCFSoftShadowMap;
+          gl.shadowMap.type = THREE.PCFShadowMap;
           if (import.meta.env.DEV) {
             bindQARendererAndNet(gl, multiplayerManager);
           }

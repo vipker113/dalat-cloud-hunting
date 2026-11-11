@@ -6,12 +6,15 @@ import {
   computeWorldAtmosphere,
   DEFAULT_OUTFIT,
   EmoteId,
+  ensureCoatMatchesGender,
   FarPeerBeacon,
+  getCoatGender,
   HeldItemId,
   LANDMARKS,
   LandmarkId,
   PlayerOutfit,
   PolaroidEntry,
+  resolveEffectiveGender,
   sampleWalkableHeight,
   WeatherStateId,
   WindChimeNote,
@@ -67,6 +70,14 @@ export interface LocalPlayerTransient {
   jumpRequested: boolean;
   moveInputX: number; // -1..1 mobile/virtual joystick or keyboard
   moveInputZ: number; // -1..1
+  // High-frequency 360° Live Dressing Stage Turntable, Pan & Zoom (0 React re-renders during drag!)
+  previewTargetYaw: number;
+  previewCurrentYaw: number;
+  previewYawVel: number;
+  previewTargetPanY: number;
+  previewCurrentPanY: number;
+  previewTargetZoom: number;
+  previewCurrentZoom: number;
 }
 
 export interface PerfMetricsSnapshot {
@@ -85,6 +96,27 @@ export interface InteractPrompt {
   actionType: 'brew_phin' | 'soy_milk' | 'sit_bench' | 'polaroid_board' | 'wind_chime' | 'acoustic_jam' | 'cub_photo';
   benchId?: string;
   position: [number, number, number];
+}
+
+export interface NearbyPeerInfo {
+  sessionId: string;
+  displayName: string;
+  isBot: boolean;
+  heldItem: HeldItemId;
+  emote: EmoteId;
+  distance: number;
+  x: number;
+  y: number;
+  z: number;
+}
+
+export interface SocialSparkleBurst {
+  id: number;
+  kind: 'greet' | 'cheers' | 'cheer';
+  x: number;
+  y: number;
+  z: number;
+  timestamp: number;
 }
 
 export interface GameStoreState {
@@ -142,6 +174,10 @@ export interface GameStoreState {
   photoShutterNonce: number;
   latestCapturedPolaroid: PolaroidEntry | null;
   nearbyPrompt: InteractPrompt | null;
+  nearbyPeer: NearbyPeerInfo | null;
+  previewYawOffset: number;
+  isDraggingPreview: boolean;
+  socialSparkleBurst: SocialSparkleBurst | null;
   toastBanner: string | null;
   perfMetrics: PerfMetricsSnapshot;
 
@@ -166,6 +202,12 @@ export interface GameStoreState {
   requestPhotoShutter: () => void;
   setLatestCapturedPolaroid: (entry: PolaroidEntry | null) => void;
   setNearbyPrompt: (prompt: InteractPrompt | null) => void;
+  setNearbyPeer: (peer: NearbyPeerInfo | null) => void;
+  setPreviewYawOffset: (yaw: number) => void;
+  addPreviewYawOffset: (deltaYaw: number) => void;
+  setIsDraggingPreview: (dragging: boolean) => void;
+  resetPreviewStage: () => void;
+  triggerSocialSparkle: (kind: SocialSparkleBurst['kind'], x: number, y: number, z: number) => void;
   showToast: (msg: string) => void;
   markLandmarkDiscovered: (id: LandmarkId) => void;
   setPerfMetrics: (metrics: PerfMetricsSnapshot) => void;
@@ -191,9 +233,13 @@ function loadSavedProfile(): { name: string; outfit: PlayerOutfit } {
     const raw = localStorage.getItem('dalat_profile_v1');
     if (raw) {
       const parsed = JSON.parse(raw);
+      const rawOutfit: PlayerOutfit = { ...DEFAULT_OUTFIT, ...(parsed.outfit || {}) };
+      const effGender = resolveEffectiveGender(rawOutfit);
+      rawOutfit.gender = effGender;
+      rawOutfit.coatStyle = ensureCoatMatchesGender(rawOutfit.coatStyle, effGender);
       return {
         name: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name : 'Người Săn Mây',
-        outfit: { ...DEFAULT_OUTFIT, ...(parsed.outfit || {}) },
+        outfit: rawOutfit,
       };
     }
   } catch {
@@ -228,21 +274,28 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   occupiedBenches: {},
 
   localTransient: {
-    x: spawn[0] - 4,
-    y: sampleWalkableHeight(spawn[0] - 4, spawn[2] + 3),
-    z: spawn[2] + 3,
+    x: -29.2,
+    y: sampleWalkableHeight(-29.2, 33.2),
+    z: 33.2,
     vx: 0,
     vy: 0,
     vz: 0,
-    yaw: 1.35,
-    cameraYaw: -0.25,
-    cameraPitch: 0.14,
+    yaw: 1.48,
+    cameraYaw: -1.62,
+    cameraPitch: 0.12,
     moving: false,
     running: false,
     grounded: true,
     jumpRequested: false,
     moveInputX: 0,
     moveInputZ: 0,
+    previewTargetYaw: 0,
+    previewCurrentYaw: 0,
+    previewYawVel: 0,
+    previewTargetPanY: 0,
+    previewCurrentPanY: 0,
+    previewTargetZoom: 1,
+    previewCurrentZoom: 1,
   },
   teleportTarget: null,
 
@@ -280,6 +333,10 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   photoShutterNonce: 0,
   latestCapturedPolaroid: null,
   nearbyPrompt: null,
+  nearbyPeer: null,
+  previewYawOffset: 0,
+  isDraggingPreview: false,
+  socialSparkleBurst: null,
   toastBanner: null,
   perfMetrics: {
     fps: 60,
@@ -298,14 +355,42 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   },
 
   updateOutfit: (partial) => {
-    const next = { ...get().outfit, ...partial };
+    const cur = get().outfit;
+    const next: PlayerOutfit = { ...cur, ...partial };
+    if (partial.gender !== undefined) {
+      next.gender = partial.gender;
+      next.coatStyle = ensureCoatMatchesGender(next.coatStyle, partial.gender);
+    } else if (partial.coatStyle !== undefined) {
+      next.gender = getCoatGender(partial.coatStyle);
+    } else {
+      next.gender = resolveEffectiveGender(next);
+    }
+    if (partial.bagStyle !== undefined) {
+      next.backpack = partial.bagStyle !== 'none';
+    } else if (partial.backpack !== undefined) {
+      next.bagStyle = partial.backpack ? cur.bagStyle && cur.bagStyle !== 'none' ? cur.bagStyle : 'trek_pack' : 'none';
+    }
     set({ outfit: next });
     try {
       localStorage.setItem('dalat_profile_v1', JSON.stringify({ name: get().displayName, outfit: next }));
     } catch {}
   },
 
-  enterWorld: () => set({ hasEnteredWorld: true, activeModal: 'none' }),
+  enterWorld: () =>
+    set((s) => {
+      // Face East toward the Volumetric Cloud Sea & Sunrise upon stepping into the world!
+      s.localTransient.yaw = 1.48;
+      s.localTransient.cameraYaw = -1.66;
+      s.localTransient.cameraPitch = 0.11;
+      s.localTransient.previewTargetYaw = 0;
+      s.localTransient.previewCurrentYaw = 0;
+      s.localTransient.previewYawVel = 0;
+      s.localTransient.previewTargetPanY = 0;
+      s.localTransient.previewCurrentPanY = 0;
+      s.localTransient.previewTargetZoom = 1;
+      s.localTransient.previewCurrentZoom = 1;
+      return { hasEnteredWorld: true, activeModal: 'none', previewYawOffset: 0, isDraggingPreview: false };
+    }),
   setHeldItem: (heldItem) => set({ heldItem }),
   triggerEmote: (activeEmote) => set({ activeEmote }),
   setSeatedBench: (seatedBenchId) => set({ seatedBenchId }),
@@ -339,12 +424,15 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
 
   teleportTo: (position, lookAt) => {
     const st = get();
+    const floorY = sampleWalkableHeight(position[0], position[2]);
+    const targetY = Number.isFinite(position[1]) ? position[1] : floorY;
     st.localTransient.x = position[0];
-    st.localTransient.y = position[1];
+    st.localTransient.y = targetY;
     st.localTransient.z = position[2];
     st.localTransient.vx = 0;
     st.localTransient.vy = 0;
     st.localTransient.vz = 0;
+    st.localTransient.grounded = Math.abs(targetY - floorY) <= 0.65;
     if (lookAt) {
       const dx = lookAt[0] - position[0];
       const dy = lookAt[1] - position[1];
@@ -382,13 +470,70 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   setQualityTier: (qualityTier, auto = false) => set({ qualityTier, autoQuality: auto }),
   setAudioEnabled: (audioEnabled) => set({ audioEnabled }),
   setMasterVolume: (masterVolume) => set({ masterVolume }),
-  setActiveModal: (activeModal) => set({ activeModal }),
+  setActiveModal: (activeModal) =>
+    set((s) => {
+      if (activeModal === 'wardrobe') {
+        s.localTransient.previewTargetYaw = 0;
+        s.localTransient.previewCurrentYaw = 0;
+        s.localTransient.previewYawVel = 0;
+        s.localTransient.previewTargetPanY = 0;
+        s.localTransient.previewCurrentPanY = 0;
+        s.localTransient.previewTargetZoom = 1;
+        s.localTransient.previewCurrentZoom = 1;
+      }
+      return {
+        activeModal,
+        previewYawOffset: activeModal === 'wardrobe' ? 0 : s.previewYawOffset,
+        isDraggingPreview: false,
+      };
+    }),
   setPhotoMode: (photoModeActive) =>
     set({ photoModeActive, activeModal: 'none', latestCapturedPolaroid: photoModeActive ? get().latestCapturedPolaroid : null }),
   setPhotoOptions: (opts) => set(opts),
   requestPhotoShutter: () => set((s) => ({ photoShutterNonce: s.photoShutterNonce + 1 })),
   setLatestCapturedPolaroid: (latestCapturedPolaroid) => set({ latestCapturedPolaroid }),
   setNearbyPrompt: (nearbyPrompt) => set({ nearbyPrompt }),
+  setNearbyPeer: (nearbyPeer) => set({ nearbyPeer }),
+  setPreviewYawOffset: (previewYawOffset) =>
+    set((s) => {
+      const cur = s.localTransient.previewCurrentYaw;
+      const shortestDelta = Math.atan2(
+        Math.sin(previewYawOffset - cur),
+        Math.cos(previewYawOffset - cur)
+      );
+      const nextTarget = cur + shortestDelta;
+      s.localTransient.previewTargetYaw = nextTarget;
+      s.localTransient.previewYawVel = 0;
+      return { previewYawOffset: nextTarget };
+    }),
+  addPreviewYawOffset: (deltaYaw) => {
+    const lt = get().localTransient;
+    lt.previewTargetYaw += deltaYaw;
+    set({ previewYawOffset: lt.previewTargetYaw });
+  },
+  setIsDraggingPreview: (isDraggingPreview) => set({ isDraggingPreview }),
+  resetPreviewStage: () =>
+    set((s) => {
+      const cur = s.localTransient.previewCurrentYaw;
+      const shortestToFront = Math.atan2(Math.sin(0 - cur), Math.cos(0 - cur));
+      const nextTarget = cur + shortestToFront;
+      s.localTransient.previewTargetYaw = nextTarget;
+      s.localTransient.previewYawVel = 0;
+      s.localTransient.previewTargetPanY = 0;
+      s.localTransient.previewTargetZoom = 1;
+      return { previewYawOffset: nextTarget, isDraggingPreview: false };
+    }),
+  triggerSocialSparkle: (kind, x, y, z) =>
+    set({
+      socialSparkleBurst: {
+        id: Date.now() + Math.random(),
+        kind,
+        x,
+        y,
+        z,
+        timestamp: Date.now(),
+      },
+    }),
 
   showToast: (msg) => {
     set({ toastBanner: msg });

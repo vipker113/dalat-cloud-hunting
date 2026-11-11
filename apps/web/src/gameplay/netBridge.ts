@@ -58,6 +58,34 @@ const offlineFallbackController: IMultiplayerController = {
   sendEmote(emote) {
     useGameStore.getState().triggerEmote(emote);
   },
+  sendSocialInteract(targetSessionId, kind) {
+    const st = useGameStore.getState();
+    const peer = st.peers[targetSessionId];
+    if (!peer || !peer.isBot) return;
+    // Offline fallback reciprocal reaction for local bots
+    const replyEmote =
+      kind === 'cheers' ? 'cheers_cup' : kind === 'cheer' ? 'cheer_sunrise' : 'wave';
+    const faceYaw = Math.atan2(st.localTransient.x - peer.x, st.localTransient.z - peer.z);
+    st.upsertPeer({ ...peer, yaw: faceYaw, moving: false, emote: replyEmote });
+    const replyLine =
+      kind === 'cheers'
+        ? `Cụng ly ấm nhé ${st.displayName}! Chúc buổi sáng săn mây thật chill ☕✨`
+        : kind === 'cheer'
+          ? `Tuyệt quá ${st.displayName} ơi, biển mây Cầu Đất đỉnh thật sự! 🌅`
+          : `Chào ${st.displayName} nha! Sáng nay trời se lạnh dễ chịu ghê 👋`;
+    setTimeout(() => {
+      useGameStore.getState().pushChatBubble({
+        id: `bot-social-${Date.now()}`,
+        senderId: peer.sessionId,
+        senderName: peer.displayName,
+        text: replyLine,
+        x: peer.x,
+        y: peer.y,
+        z: peer.z,
+        timestamp: Date.now(),
+      });
+    }, 420);
+  },
   requestBenchSeat(benchId) {
     const st = useGameStore.getState();
     st.setSeatedBench(benchId);

@@ -55,6 +55,16 @@ async function fetchGlbMaster(url: string): Promise<THREE.Group | null> {
           const m = child as THREE.Mesh;
           m.castShadow = true;
           m.receiveShadow = true;
+          const mats = Array.isArray(m.material) ? m.material : [m.material];
+          for (const mat of mats) {
+            const std = mat as THREE.MeshStandardMaterial;
+            if (!std) continue;
+            for (const tex of [std.map, std.normalMap, std.roughnessMap, std.aoMap]) {
+              if (tex) {
+                tex.anisotropy = 8;
+              }
+            }
+          }
         }
       });
       return gltf.scene;
@@ -113,9 +123,9 @@ function useSafeGlbClone(url: string, enableShadow = true): THREE.Group | null {
 function CafeMoSuongFallback() {
   return (
     <group name="CafeMoSuongFallback">
-      {/* Stilted wooden veranda deck matching [-54..-23, z: 19..41, y: 135.15] */}
-      <mesh position={[-0.5, -0.1, 0]} castShadow receiveShadow>
-        <boxGeometry args={[31, 0.5, 22]} />
+      {/* Stilted wooden veranda deck matching [-51.75..-24.25, z: 19.75..40.25, top y: 135.307] */}
+      <mesh position={[0, -0.093, 0]} castShadow receiveShadow>
+        <boxGeometry args={[27.5, 0.5, 20.5]} />
         <meshStandardMaterial color="#7C5134" roughness={0.85} />
       </mesh>
       {/* Cozy Da Lat A-frame / timber cabin body */}
@@ -290,8 +300,8 @@ function SingleWindTurbine({ position, yaw, phase, castShadow, beaconMaterial }:
 }
 
 export function HeroLandmarks() {
-  const cafeScene = useSafeGlbClone('/assets/models/cafe_mo_suong.glb');
-  const cauGoScene = useSafeGlbClone('/assets/models/cau_go_bridge.glb');
+  const cafeScene = useSafeGlbClone('/assets/models/cafe_mo_suong.glb?v=gfx3');
+  const cauGoScene = useSafeGlbClone('/assets/models/cau_go_bridge.glb?v=gfx3');
   const lonelyPineScene = useSafeGlbClone('/assets/models/lonely_pine_hero.glb');
   const cub50Scene = useSafeGlbClone('/assets/models/vintage_cub50.glb');
   const campfireScene = useSafeGlbClone('/assets/models/campfire_stage.glb');
@@ -307,11 +317,11 @@ export function HeroLandmarks() {
   const mergedSubstructureGeo = useMemo(() => {
     const parts: THREE.BufferGeometry[] = [];
 
-    const verandaSlab = new THREE.BoxGeometry(28.3, 0.18, 21.8);
-    verandaSlab.translate(-37.25, 135.06, 30);
+    const verandaSlab = new THREE.BoxGeometry(27.3, 0.18, 20.3);
+    verandaSlab.translate(-38.0, 135.06, 30);
     parts.push(verandaSlab);
 
-    const xs = [-50.5, -42.0, -33.0, -24.0];
+    const xs = [-50.5, -42.0, -33.0, -25.0];
     const zs = [20.5, 30.0, 39.5];
     for (const x of xs) {
       for (const z of zs) {
@@ -330,8 +340,7 @@ export function HeroLandmarks() {
       for (const dz of zOffsets) {
         const z = -75 + dz;
         const groundY = sampleGroundHeight(x, z);
-        const t = clamp((x - 50) / 41, 0, 1);
-        const deckY = 196.02 + t * 2.1;
+        const deckY = x >= 85 ? 198.08 : 196.0 + Math.max(0, x - 52) * 0.0525;
         const height = Math.max(1.2, deckY - groundY + 0.6);
         const cyl = new THREE.CylinderGeometry(0.13, 0.16, height, 6);
         cyl.translate(x, deckY - height * 0.5, z);
@@ -411,7 +420,7 @@ export function HeroLandmarks() {
 
   return (
     <group name="DaLatHeroLandmarks">
-      {/* 1. Tiệm Cà Phê Gỗ "Mơ Sương" at [-38, 135.15, 30] */}
+      {/* 1. Tiệm Cà Phê Gỗ "Mơ Sương" at [-38, 135.15, 30] (visual veranda plank tops sit at 135.307m) */}
       <group position={[-38, 135.15, 30]} name="Landmark_CafeMoSuong">
         {cafeScene ? <primitive object={cafeScene} /> : <CafeMoSuongFallback />}
         <pointLight

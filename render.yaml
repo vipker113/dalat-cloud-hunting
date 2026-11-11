@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: dalat-cloud-hunting
+    runtime: node
+    plan: free
+    buildCommand: bun install && bun run build
+    startCommand: bun run start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production

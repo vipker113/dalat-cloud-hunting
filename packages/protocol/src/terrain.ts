@@ -232,21 +232,23 @@ export function sampleGroundHeight(x: number, z: number): number {
 export function sampleWalkableHeight(x: number, z: number): number {
   const ground = sampleGroundHeight(x, z);
 
-  // 1. Cầu Gỗ Săn Mây wooden bridge extending East from (50, -75) to circular deck at (91, -75)
-  if (x >= 50 && x <= 99 && Math.abs(z - -75) <= 7.3) {
-    const inBridgeCorridor = x <= 86.5 && Math.abs(z - -75) <= 2.7;
+  // 1. Cầu Gỗ Săn Mây wooden bridge (x=52..84.5 ramp + flat circular sunrise deck centered at 91,-75 at y=198.28m)
+  if (x >= 50 && x <= 98.5 && Math.abs(z - -75) <= 7.0) {
     const distDeck = Math.hypot(x - 91, z - -75);
-    const inRoundDeck = distDeck <= 7.3;
-    if (inBridgeCorridor || inRoundDeck) {
-      const t = clamp((x - 50) / 41, 0, 1);
-      const bridgeY = 196.15 + t * 2.1; // Flush 196.15m at x=50, rising gently to 198.25m (~1,648m ASL)
+    if (distDeck <= 6.75) {
+      return Math.max(ground, 198.28);
+    }
+    if (x <= 85.0 && Math.abs(z - -75) <= 2.7) {
+      const rampY = 196.15 + clamp(x - 52, 0, 32.5) * 0.0525;
+      const deckBlend = smoothstep(83.2, 84.6, x);
+      const bridgeY = rampY * (1 - deckBlend) + 198.28 * deckBlend;
       return Math.max(ground, bridgeY);
     }
   }
 
-  // 2. Tiệm Cà Phê Mơ Sương stilted wooden scenic deck extending East from (-51..-23, z: 19..41)
-  if (x >= -51.5 && x <= -23 && z >= 19 && z <= 41) {
-    return Math.max(ground, 135.15);
+  // 2. Tiệm Cà Phê Mơ Sương stilted wooden scenic deck (-51.85..-24.15, z: 19.65..40.35, plank top = 135.307m)
+  if (x >= -51.85 && x <= -24.15 && z >= 19.65 && z <= 40.35) {
+    return Math.max(ground, 135.307);
   }
 
   return ground;
@@ -254,8 +256,8 @@ export function sampleWalkableHeight(x: number, z: number): number {
 
 export function getSurfaceType(x: number, z: number): SurfaceType {
   if (
-    (x >= 50 && x <= 99 && (Math.abs(z - -75) <= 2.7 || Math.hypot(x - 91, z - -75) <= 7.3)) ||
-    (x >= -51.5 && x <= -23 && z >= 19 && z <= 41)
+    (x >= 50 && x <= 98.5 && (Math.abs(z - -75) <= 2.7 || Math.hypot(x - 91, z - -75) <= 6.75)) ||
+    (x >= -51.85 && x <= -24.15 && z >= 19.65 && z <= 40.35)
   ) {
     return 'wood_deck';
   }
