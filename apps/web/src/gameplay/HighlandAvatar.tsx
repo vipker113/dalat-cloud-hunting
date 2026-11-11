@@ -1224,6 +1224,29 @@ export function LocalPlayerAvatar() {
     turnBank: 0,
   });
 
+  const readCurrentMotion = () => {
+    const st = useGameStore.getState();
+    const lt = st.localTransient;
+    const dressing = !st.hasEnteredWorld || st.activeModal === 'wardrobe';
+    const jamAge = st.lastJamNote ? (Date.now() - st.lastJamNote.timestamp) / 1000 : 99;
+    const isMyJam =
+      st.lastJamNote &&
+      (st.lastJamNote.senderId === st.localSessionId || st.lastJamNote.senderId === 'local');
+
+    const m = motionSample.current;
+    m.moving = dressing ? false : lt.moving;
+    m.running = dressing ? false : lt.running;
+    m.grounded = dressing ? true : lt.grounded;
+    m.speed = dressing ? 0 : Math.hypot(lt.vx, lt.vz);
+    m.seated = dressing ? false : Boolean(st.seatedBenchId);
+    m.emote = st.activeEmote;
+    m.warmBuff = st.warmthRemainingSec > 0;
+    m.temperatureC = st.atmosphere.temperatureC;
+    m.windStrength = st.atmosphere.windStrength;
+    m.jamPulse = isMyJam && jamAge < 1.4 ? 1 - jamAge / 1.4 : 0;
+    return m;
+  };
+
   useFrame(({ camera }, rawDt) => {
     const dt = Math.max(0.001, Math.min(rawDt, 0.06));
     const st = useGameStore.getState();
@@ -1249,23 +1272,7 @@ export function LocalPlayerAvatar() {
       ? THREE.MathUtils.clamp(lt.previewYawVel * 0.075, -0.6, 0.6)
       : THREE.MathUtils.clamp((yawDelta / dt) * 0.16, -1, 1);
 
-    const jamAge = st.lastJamNote ? (Date.now() - st.lastJamNote.timestamp) / 1000 : 99;
-    const isMyJam =
-      st.lastJamNote &&
-      (st.lastJamNote.senderId === st.localSessionId || st.lastJamNote.senderId === 'local');
-
-    const m = motionSample.current;
-    m.moving = dressing ? false : lt.moving;
-    m.running = dressing ? false : lt.running;
-    m.grounded = dressing ? true : lt.grounded;
-    m.speed = dressing ? 0 : Math.hypot(lt.vx, lt.vz);
-    m.seated = dressing ? false : Boolean(st.seatedBenchId);
-    m.emote = st.activeEmote;
-    m.warmBuff = st.warmthRemainingSec > 0;
-    m.temperatureC = st.atmosphere.temperatureC;
-    m.windStrength = st.atmosphere.windStrength;
-    m.jamPulse = isMyJam && jamAge < 1.4 ? 1 - jamAge / 1.4 : 0;
-    m.turnBank = -yawRate;
+    motionSample.current.turnBank = -yawRate;
   });
 
   return (
@@ -1275,7 +1282,7 @@ export function LocalPlayerAvatar() {
         heldItem={heldItem}
         isLocal={true}
         seed={0.19}
-        getMotion={() => motionSample.current}
+        getMotion={readCurrentMotion}
       />
       {/* Warm highland portrait key-light active during Landing / Wardrobe outfit selection */}
       {isDressingPreview && (

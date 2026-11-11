@@ -196,19 +196,24 @@ function createObstacleWallAndPropColliders(): THREE.BufferGeometry[] {
   obs.push(makeWallSegment2D(-41.55, 39.95, -24.3, 39.95, 135.0, 1.75, 0.36));
   obs.push(makeWallSegment2D(-24.42, 19.95, -24.42, 40.05, 135.0, 1.75, 0.36));
 
-  // Veranda string-light timber poles & 3 bistro table sets
-  obs.push(makeOpenCylinderCollider(0.24, 4.0, -26.5, 135.0, 24.5, 8));
-  obs.push(makeOpenCylinderCollider(0.24, 4.0, -26.5, 135.0, 35.5, 8));
-  obs.push(makeOpenCylinderCollider(0.74, 1.45, -32.5, 135.0, 35.0, 10));
-  obs.push(makeOpenCylinderCollider(0.74, 1.45, -32.5, 135.0, 25.5, 10));
-  obs.push(makeOpenCylinderCollider(0.74, 1.45, -28.5, 135.0, 30.0, 10));
+  // Veranda string-light timber poles & 3 bistro table sets (tight radii so walkways never snag)
+  obs.push(makeOpenCylinderCollider(0.18, 4.0, -26.5, 135.0, 24.5, 8));
+  obs.push(makeOpenCylinderCollider(0.18, 4.0, -26.5, 135.0, 35.5, 8));
+  obs.push(makeOpenCylinderCollider(0.42, 1.15, -32.5, 135.0, 35.0, 10));
+  obs.push(makeOpenCylinderCollider(0.42, 1.15, -32.5, 135.0, 25.5, 10));
+  obs.push(makeOpenCylinderCollider(0.42, 1.15, -28.5, 135.0, 30.0, 10));
 
-  // Under-veranda timber support stilts
+  // Under-veranda timber support stilts (strictly below deck floor 135.06m so they never poke through!)
   for (const sx of [-50.5, -42.0, -33.0, -25.0]) {
     for (const sz of [20.5, 30.0, 39.5]) {
       const gy = sampleGroundHeight(sx, sz);
-      const h = Math.max(0.8, 135.06 - gy + 0.4);
-      obs.push(makeOpenCylinderCollider(0.2, h, sx, gy - 0.3, sz, 6));
+      const clearance = 135.06 - gy;
+      if (clearance > 1.85) {
+        const botY = gy - 0.2;
+        const maxTopY = 135.06 - 0.6;
+        const h = Math.max(0.5, maxTopY - botY);
+        obs.push(makeOpenCylinderCollider(0.18, h, sx, botY, sz, 6));
+      }
     }
   }
 
@@ -249,14 +254,18 @@ function createObstacleWallAndPropColliders(): THREE.BufferGeometry[] {
   // Wooden check-in signboard on circular sunrise deck
   obs.push(makeOpenWallPrism(0.8, 2.5, 1.7, 96.2, 198.05, -78.3));
 
-  // Under-bridge timber support stilts
+  // Under-bridge timber support stilts (strictly below bridge deck so entrance never snags)
   for (const bx of [58, 66, 74, 82, 91, 96]) {
     const zOffsets = bx >= 88 ? [-4.6, 4.6] : [-2.1, 2.1];
     for (const dz of zOffsets) {
       const bz = -75 + dz;
       const gy = sampleGroundHeight(bx, bz);
       const topY = bx >= 85 ? 198.08 : 196.0 + Math.max(0, bx - 52) * 0.0525;
-      obs.push(makeOpenCylinderCollider(0.2, Math.max(1.2, topY - gy + 0.5), bx, gy - 0.3, bz, 6));
+      if (topY - gy > 1.85) {
+        const botY = gy - 0.2;
+        const maxTopY = topY - 0.6;
+        obs.push(makeOpenCylinderCollider(0.18, Math.max(0.5, maxTopY - botY), bx, botY, bz, 6));
+      }
     }
   }
 
@@ -289,7 +298,7 @@ function createObstacleWallAndPropColliders(): THREE.BufferGeometry[] {
 
   // 5. All Shared Wooden Benches (players still sit smoothly via [E], blocked from walking through!)
   for (const b of SHARED_BENCHES) {
-    obs.push(makeOpenWallPrism(1.82, 1.2, 0.64, b.position[0], b.position[1] - 0.1, b.position[2], b.yaw));
+    obs.push(makeOpenWallPrism(1.66, 1.1, 0.48, b.position[0], b.position[1] - 0.1, b.position[2], b.yaw));
   }
 
   // 6. All ~460 Highland Pine Tree Trunks & Trail Lantern Posts

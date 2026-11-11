@@ -30,6 +30,8 @@ export type EmoteId =
   | 'cheers_cup'
   | 'cheer_sunrise';
 
+export type SocialInteractKind = 'greet' | 'cheers' | 'cheer' | 'gift_flower' | 'sparkler';
+
 export type AvatarGender = 'female' | 'male';
 
 export type CoatStyleId =

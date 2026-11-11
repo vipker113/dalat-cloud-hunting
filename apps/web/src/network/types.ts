@@ -5,6 +5,7 @@ import type {
   HeldItemId,
   PlayerOutfit,
   PolaroidEntry,
+  SocialInteractKind,
 } from '@dalat/protocol';
 
 export interface IMultiplayerController {
@@ -17,7 +18,7 @@ export interface IMultiplayerController {
   sendProfile(displayName: string, outfit: PlayerOutfit): void;
   sendHeldItem(item: HeldItemId): void;
   sendEmote(emote: EmoteId): void;
-  sendSocialInteract(targetSessionId: string, kind: 'greet' | 'cheers' | 'cheer'): void;
+  sendSocialInteract(targetSessionId: string, kind: SocialInteractKind): void;
   requestBenchSeat(benchId: string | null): void;
   sendJamNote(chordIndex: number, instrument: AcousticJamNote['instrument']): void;
   pinPolaroid(entry: Omit<PolaroidEntry, 'id' | 'likes' | 'createdAt'>): void;

@@ -118,6 +118,10 @@ function resolveGameKeyCode(e: KeyboardEvent): string {
         return 'KeyH';
       case 86:
         return 'KeyV';
+      case 70:
+        return 'KeyF';
+      case 66:
+        return 'KeyB';
       case 67:
         return 'KeyC';
       case 80:
@@ -144,12 +148,7 @@ function resolveGameKeyCode(e: KeyboardEvent): string {
   if (rawKey === 'arrowleft') return 'ArrowLeft';
   if (rawKey === 'arrowright') return 'ArrowRight';
 
-  // Vietnamese Telex / VNI character decoding:
-  // In Telex:
-  // - W produces 'ư', or adds horn (\u031b) / breve (\u0306) to 'a'/'o'/'u'
-  // - S adds acute tone (\u0301) to a vowel ('á', 'ứ', 'ắ', 'ấ', 'ế', 'ố', 'ớ')
-  // - A produces 'a', 'ă', 'â'
-  // - D produces 'd', 'đ'
+  // Vietnamese Telex / VNI character decoding (used only when hardware e.code is unavailable):
   const nfd = rawKey.normalize('NFD');
   if (rawKey === 'w' || rawKey === 'ư' || rawKey === 'ứ' || rawKey === 'ừ' || rawKey === 'ử' || rawKey === 'ữ' || rawKey === 'ự') {
     return 'KeyW';
@@ -170,6 +169,8 @@ function resolveGameKeyCode(e: KeyboardEvent): string {
   if (rawKey === 'g') return 'KeyG';
   if (rawKey === 'h') return 'KeyH';
   if (rawKey === 'v') return 'KeyV';
+  if (rawKey === 'f' || nfd.includes('\u0300')) return 'KeyF';
+  if (rawKey === 'b') return 'KeyB';
   if (rawKey === 'c') return 'KeyC';
   if (rawKey === 'p') return 'KeyP';
   if (rawKey === 'm') return 'KeyM';
@@ -254,22 +255,21 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const st = useGameStore.getState();
       const code = resolveGameKeyCode(e);
 
-      // Movement keys — also preventDefault so macOS Press-and-Hold accent popup and Vietnamese IME
-      // composition do not swallow subsequent keyup events!
+      // Prevent IME composition or macOS Press-and-Hold popup when walking/playing outside text inputs
+      if (!e.ctrlKey && !e.metaKey && (e.keyCode === 229 || code.startsWith('Key') || code.startsWith('Arrow'))) {
+        e.preventDefault();
+      }
+
       if (code === 'KeyW' || code === 'ArrowUp') {
-        if (!e.ctrlKey && !e.metaKey) e.preventDefault();
         keysRef.current.forward = true;
       }
       if (code === 'KeyS' || code === 'ArrowDown') {
-        if (!e.ctrlKey && !e.metaKey) e.preventDefault();
         keysRef.current.backward = true;
       }
       if (code === 'KeyA' || code === 'ArrowLeft') {
-        if (!e.ctrlKey && !e.metaKey) e.preventDefault();
         keysRef.current.left = true;
       }
       if (code === 'KeyD' || code === 'ArrowRight') {
-        if (!e.ctrlKey && !e.metaKey) e.preventDefault();
         keysRef.current.right = true;
       }
       if (code === 'ShiftLeft' || code === 'ShiftRight') keysRef.current.shift = true;
@@ -319,7 +319,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         return;
       }
 
-      // Quick Social Interactions when near another cloud-hunter: [G] Greet, [H] Warm Cup Clink, [V] Cheer, [C] Portrait
+      // Quick Social Interactions when near another cloud-hunter: [G] Greet, [H] Warm Cup Clink, [V] Cheer, [F] Gift Flower, [B] Sparkler, [C] Portrait
       if (!e.repeat && !st.photoModeActive && st.activeModal === 'none' && st.nearbyPeer) {
         if (code === 'KeyG') {
           executePeerSocialAction('greet', st.nearbyPeer, net);
@@ -331,6 +331,14 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         }
         if (code === 'KeyV') {
           executePeerSocialAction('cheer', st.nearbyPeer, net);
+          return;
+        }
+        if (code === 'KeyF') {
+          executePeerSocialAction('gift_flower', st.nearbyPeer, net);
+          return;
+        }
+        if (code === 'KeyB') {
+          executePeerSocialAction('sparkler', st.nearbyPeer, net);
           return;
         }
         if (code === 'KeyC') {
@@ -379,53 +387,42 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
+      if (!e.shiftKey) {
+        keysRef.current.shift = false;
+      }
+
+      // 1. Always trust physical USB HID e.code first so releasing A/S/D never cancels a held W key under Telex!
+      const hwCode = e.code;
+      if (hwCode && hwCode !== 'Unidentified') {
+        if (hwCode === 'KeyW' || hwCode === 'ArrowUp') {
+          keysRef.current.forward = false;
+          return;
+        }
+        if (hwCode === 'KeyS' || hwCode === 'ArrowDown') {
+          keysRef.current.backward = false;
+          return;
+        }
+        if (hwCode === 'KeyA' || hwCode === 'ArrowLeft') {
+          keysRef.current.left = false;
+          return;
+        }
+        if (hwCode === 'KeyD' || hwCode === 'ArrowRight') {
+          keysRef.current.right = false;
+          return;
+        }
+        if (hwCode === 'ShiftLeft' || hwCode === 'ShiftRight') {
+          keysRef.current.shift = false;
+          return;
+        }
+      }
+
+      // 2. Fallback only when hardware e.code is missing (e.g. legacy Windows IME VK_PACKET)
       const code = resolveGameKeyCode(e);
       if (code === 'KeyW' || code === 'ArrowUp') keysRef.current.forward = false;
       if (code === 'KeyS' || code === 'ArrowDown') keysRef.current.backward = false;
       if (code === 'KeyA' || code === 'ArrowLeft') keysRef.current.left = false;
       if (code === 'KeyD' || code === 'ArrowRight') keysRef.current.right = false;
       if (code === 'ShiftLeft' || code === 'ShiftRight') keysRef.current.shift = false;
-
-      // Extra Unikey / Telex multi-character release safety:
-      // In Telex, pressing W+S ('ứ') or A+W ('ă') or D+D ('đ') can emit a combined character on keyup.
-      const rawKey = (e.key || '').toLowerCase();
-      if (rawKey) {
-        const nfd = rawKey.normalize('NFD');
-        if (rawKey === 'w' || rawKey === 'ư' || nfd.includes('\u031b') || nfd.includes('\u0306')) {
-          keysRef.current.forward = false;
-        }
-        if (rawKey === 's' || nfd.includes('\u0301')) {
-          keysRef.current.backward = false;
-        }
-        if (rawKey === 'a' || nfd.startsWith('a')) {
-          keysRef.current.left = false;
-        }
-        if (rawKey === 'd' || rawKey === 'đ') {
-          keysRef.current.right = false;
-        }
-      }
-
-      // If an IME emits an unidentified / VK_PACKET (229) keyup without a physical code, release all movement keys
-      // so a swallowed Unikey packet can never leave WASD stuck.
-      if (!code && (e.keyCode === 229 || rawKey === 'process' || rawKey === 'dead' || rawKey === 'unidentified')) {
-        keysRef.current.forward = false;
-        keysRef.current.backward = false;
-        keysRef.current.left = false;
-        keysRef.current.right = false;
-      }
-      if (!e.shiftKey) {
-        keysRef.current.shift = false;
-      }
-    };
-
-    const onCompositionEnd = () => {
-      if (!isTypingInInput()) {
-        // Ensure any IME composition session outside an input doesn't leave movement keys latched
-        keysRef.current.forward = false;
-        keysRef.current.backward = false;
-        keysRef.current.left = false;
-        keysRef.current.right = false;
-      }
     };
 
     const onWindowBlur = () => {
@@ -455,7 +452,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       if (!el || typeof el.closest !== 'function') return false;
       return Boolean(
         el.closest(
-          '[data-dalat-drawer="true"], button, input, textarea, select, a, label, [role="button"]'
+          '[data-dalat-drawer="true"], [data-dalat-peer-pill="true"], button, input, textarea, select, a, label, [role="button"]'
         )
       );
     };
@@ -487,22 +484,6 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         orbitStateRef.current.dragging = true;
         orbitStateRef.current.lastX = e.clientX;
         orbitStateRef.current.lastY = e.clientY;
-      }
-      // Click on 3D canvas engages smooth free-look Pointer Lock (Esc or Alt unlocks anytime; drag still works as fallback)
-      if (
-        e.button === 0 &&
-        !e.altKey &&
-        document.pointerLockElement !== dom &&
-        !st.latestCapturedPolaroid
-      ) {
-        try {
-          const maybePromise = dom.requestPointerLock?.() as unknown as Promise<void> | undefined;
-          if (maybePromise && typeof maybePromise.catch === 'function') {
-            maybePromise.catch(() => {});
-          }
-        } catch {
-          // Ignore if sandboxed or headless browser declines Pointer Lock
-        }
       }
     };
 
@@ -628,6 +609,12 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         }
         return;
       }
+      // Two-finger horizontal trackpad pan rotates camera yaw smoothly in third-person mode
+      if (!e.ctrlKey && Math.abs(e.deltaX) > Math.abs(e.deltaY) * 1.1 && Math.abs(e.deltaX) > 0.4) {
+        e.preventDefault();
+        st.localTransient.cameraYaw -= e.deltaX * 0.0042;
+        return;
+      }
       orbitStateRef.current.targetDistance = THREE.MathUtils.clamp(
         orbitStateRef.current.targetDistance + e.deltaY * 0.0045,
         1.35,
@@ -647,7 +634,6 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
 
     window.addEventListener('keydown', onKeyDown, { capture: true });
     window.addEventListener('keyup', onKeyUp, { capture: true });
-    window.addEventListener('compositionend', onCompositionEnd, { capture: true });
     window.addEventListener('blur', onWindowBlur);
     document.addEventListener('visibilitychange', onVisibilityChange);
     window.addEventListener('pointerdown', onWindowPointerDown);
@@ -662,7 +648,6 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     return () => {
       window.removeEventListener('keydown', onKeyDown, { capture: true });
       window.removeEventListener('keyup', onKeyUp, { capture: true });
-      window.removeEventListener('compositionend', onCompositionEnd, { capture: true });
       window.removeEventListener('blur', onWindowBlur);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('pointerdown', onWindowPointerDown);
@@ -905,17 +890,8 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
 
         if (lt.moving) {
           const desiredYaw = Math.atan2(wishDirX, wishDirZ);
-          const turnLambda = lt.running ? 16.5 : 14.5;
+          const turnLambda = lt.running ? 18.0 : 16.0;
           lt.yaw += shortestAngleDiff(lt.yaw, desiredYaw) * (1 - Math.exp(-turnLambda * dt));
-
-          // Gentle auto-follow camera alignment when strafing/turning without mouse lock or drag
-          const isPointerLocked = document.pointerLockElement === gl.domElement;
-          if (!isPointerLocked && !oState.dragging && Math.abs(rawInX) > 0.15 && rawInZ <= 0.1) {
-            const targetCamYaw = Math.atan2(-wishDirX, -wishDirZ);
-            lt.cameraYaw +=
-              shortestAngleDiff(lt.cameraYaw, targetCamYaw) *
-              (1 - Math.exp(-1.15 * Math.abs(rawInX) * dt));
-          }
         }
 
         // Coyote Time + Jump Input Buffer + Downhill Slope Grounding
@@ -1266,10 +1242,10 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         oState.smoothFloorLift = 0;
         oState.initialized = true;
       } else {
-        const xzBlend = 1 - Math.exp(-28 * dt);
+        // Lock XZ pivot 1:1 to velocity-smoothed player position so avatar never jitters relative to camera!
         const yBlend = 1 - Math.exp(-18 * dt);
-        oState.smoothPivot.x += (_camPivot.x - oState.smoothPivot.x) * xzBlend;
-        oState.smoothPivot.z += (_camPivot.z - oState.smoothPivot.z) * xzBlend;
+        oState.smoothPivot.x = _camPivot.x;
+        oState.smoothPivot.z = _camPivot.z;
         oState.smoothPivot.y += (_camPivot.y - oState.smoothPivot.y) * yBlend;
       }
 
@@ -1337,7 +1313,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
 
       const nextPeer = st.photoModeActive ? null : evaluateNearbyPeer(lt.x, lt.y, lt.z);
       const nextPeerKey = nextPeer
-        ? `${nextPeer.sessionId}:${nextPeer.displayName}:${Math.round(nextPeer.distance * 2)}`
+        ? `${nextPeer.sessionId}:${nextPeer.displayName}:${nextPeer.heldItem}:${nextPeer.seatId || ''}:${Math.round(nextPeer.distance)}`
         : '';
       if (nextPeerKey !== tState.lastPeerKey) {
         tState.lastPeerKey = nextPeerKey;

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef } from 'react';
 import * as THREE from 'three';
 import { useFrame } from '@react-three/fiber';
+import type { SocialInteractKind } from '@dalat/protocol';
 import type { IMultiplayerController } from '../network/types';
 import { useGameStore } from '../store/gameStore';
 import { LocalPlayerAvatar } from './HighlandAvatar';
@@ -27,7 +28,7 @@ function SocialSparkleFX() {
   const activeBurstRef = useRef<{
     nonce: number;
     age: number;
-    kind: 'greet' | 'cheers' | 'cheer';
+    kind: SocialInteractKind;
     x: number;
     y: number;
     z: number;
@@ -75,6 +76,12 @@ function SocialSparkleFX() {
     if (burst.kind === 'cheers') {
       moteMat.color.set('#FFD27D');
       ringMat.color.set('#FFF0CA');
+    } else if (burst.kind === 'gift_flower') {
+      moteMat.color.set('#C9A8FF');
+      ringMat.color.set('#F4E2FF');
+    } else if (burst.kind === 'sparkler') {
+      moteMat.color.set('#FFF4B8');
+      ringMat.color.set('#FFE89E');
     } else if (burst.kind === 'cheer') {
       moteMat.color.set('#FFB978');
       ringMat.color.set('#FFD9A0');

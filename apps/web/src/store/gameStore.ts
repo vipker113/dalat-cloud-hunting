@@ -16,6 +16,7 @@ import {
   PolaroidEntry,
   resolveEffectiveGender,
   sampleWalkableHeight,
+  SocialInteractKind,
   WeatherStateId,
   WindChimeNote,
 } from '@dalat/protocol';
@@ -104,6 +105,7 @@ export interface NearbyPeerInfo {
   isBot: boolean;
   heldItem: HeldItemId;
   emote: EmoteId;
+  seatId?: string;
   distance: number;
   x: number;
   y: number;
@@ -112,10 +114,17 @@ export interface NearbyPeerInfo {
 
 export interface SocialSparkleBurst {
   id: number;
-  kind: 'greet' | 'cheers' | 'cheer';
+  kind: SocialInteractKind;
   x: number;
   y: number;
   z: number;
+  timestamp: number;
+}
+
+export interface IncomingSocialPrompt {
+  fromId: string;
+  fromName: string;
+  kind: SocialInteractKind;
   timestamp: number;
 }
 
@@ -175,6 +184,8 @@ export interface GameStoreState {
   latestCapturedPolaroid: PolaroidEntry | null;
   nearbyPrompt: InteractPrompt | null;
   nearbyPeer: NearbyPeerInfo | null;
+  selectedPeerSessionId: string | null;
+  incomingSocialPrompt: IncomingSocialPrompt | null;
   previewYawOffset: number;
   isDraggingPreview: boolean;
   socialSparkleBurst: SocialSparkleBurst | null;
@@ -203,6 +214,8 @@ export interface GameStoreState {
   setLatestCapturedPolaroid: (entry: PolaroidEntry | null) => void;
   setNearbyPrompt: (prompt: InteractPrompt | null) => void;
   setNearbyPeer: (peer: NearbyPeerInfo | null) => void;
+  setSelectedPeer: (sessionId: string | null) => void;
+  setIncomingSocialPrompt: (prompt: IncomingSocialPrompt | null) => void;
   setPreviewYawOffset: (yaw: number) => void;
   addPreviewYawOffset: (deltaYaw: number) => void;
   setIsDraggingPreview: (dragging: boolean) => void;
@@ -334,6 +347,8 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   latestCapturedPolaroid: null,
   nearbyPrompt: null,
   nearbyPeer: null,
+  selectedPeerSessionId: null,
+  incomingSocialPrompt: null,
   previewYawOffset: 0,
   isDraggingPreview: false,
   socialSparkleBurst: null,
@@ -511,6 +526,8 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   setLatestCapturedPolaroid: (latestCapturedPolaroid) => set({ latestCapturedPolaroid }),
   setNearbyPrompt: (nearbyPrompt) => set({ nearbyPrompt }),
   setNearbyPeer: (nearbyPeer) => set({ nearbyPeer }),
+  setSelectedPeer: (selectedPeerSessionId) => set({ selectedPeerSessionId }),
+  setIncomingSocialPrompt: (incomingSocialPrompt) => set({ incomingSocialPrompt }),
   setPreviewYawOffset: (previewYawOffset) =>
     set((s) => {
       const cur = s.localTransient.previewCurrentYaw;

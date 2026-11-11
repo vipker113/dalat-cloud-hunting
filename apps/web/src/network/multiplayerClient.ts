@@ -23,6 +23,7 @@ import {
   resolveEffectiveGender,
   sampleWalkableHeight,
   SHARED_BENCHES,
+  type SocialInteractKind,
   type WindChimeNote,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
@@ -576,7 +577,7 @@ class MultiplayerClientController implements IMultiplayerController {
 
   public sendSocialInteract(
     targetSessionId: string,
-    kind: 'greet' | 'cheers' | 'cheer'
+    kind: SocialInteractKind
   ): void {
     if (!targetSessionId) return;
     if (this.room && useGameStore.getState().connected) {
@@ -1020,14 +1021,15 @@ class MultiplayerClientController implements IMultiplayerController {
       }
     });
 
-    // 5b. Quick Social Interactions (Wave / Warm Cup Clink / Cheer Sunrise)
+    // 5b. Quick Social Interactions (Wave / Warm Cup Clink / Cheer Sunrise / Gift Flower / Sparkler)
     room.onMessage(
       'social_event',
       (evt: {
         fromId?: string;
         fromName?: string;
         targetId?: string;
-        kind?: 'greet' | 'cheers' | 'cheer';
+        targetName?: string;
+        kind?: SocialInteractKind;
         x?: number;
         y?: number;
         z?: number;
@@ -1044,11 +1046,37 @@ class MultiplayerClientController implements IMultiplayerController {
         }
         if (evt.targetId === room.sessionId && evt.fromId !== room.sessionId) {
           const sender = evt.fromName || 'Một lữ khách';
+          if (evt.fromId) {
+            st.setSelectedPeer(evt.fromId);
+            const promptObj = {
+              fromId: evt.fromId,
+              fromName: sender,
+              kind: evt.kind,
+              timestamp: Date.now(),
+            };
+            st.setIncomingSocialPrompt(promptObj);
+            setTimeout(() => {
+              const cur = useGameStore.getState().incomingSocialPrompt;
+              if (cur && cur.timestamp === promptObj.timestamp) {
+                useGameStore.getState().setIncomingSocialPrompt(null);
+              }
+            }, 8500);
+          }
+
           if (evt.kind === 'cheers') {
             st.grantWarmthBuff(480);
             st.showToast(`☕ ${sender} vừa cụng ly ấm cùng bạn — Giữ ấm +8 phút (+12% bước chân)!`);
+          } else if (evt.kind === 'gift_flower') {
+            st.setHeldItem('hydrangea_bouquet');
+            this.lastSentHeldItem = 'hydrangea_bouquet';
+            st.grantWarmthBuff(480);
+            st.showToast(`💐 ${sender} vừa tặng bạn bó hoa Cẩm Tú Cầu Đà Lạt! (+8 phút ấm áp)`);
+          } else if (evt.kind === 'sparkler') {
+            st.setHeldItem('sparkler');
+            this.lastSentHeldItem = 'sparkler';
+            st.showToast(`✨ ${sender} vừa cùng bạn đốt pháo bông sương sớm!`);
           } else if (evt.kind === 'greet') {
-            st.showToast(`👋 ${sender} đang vẫy tay chào bạn giữa sương sớm!`);
+            st.showToast(`👋 ${sender} đang vẫy tay chào bạn — Nhấn [G] để đáp lại!`);
           } else if (evt.kind === 'cheer') {
             st.showToast(`🙌 ${sender} đang reo vui đón biển mây cùng bạn!`);
           }
@@ -1164,6 +1192,14 @@ class MultiplayerClientController implements IMultiplayerController {
   ): void {
     if (!player || player.isBot) return;
     if (sessionId === room.sessionId) {
+      if (this.localNumericId === -1 && Number.isFinite(player.spawnX) && Number.isFinite(player.spawnZ)) {
+        const lt = useGameStore.getState().localTransient;
+        if (!lt.moving && Math.hypot(lt.x - -29.2, lt.z - 33.2) < 0.25) {
+          lt.x = player.spawnX;
+          lt.z = player.spawnZ;
+          lt.y = Number.isFinite(player.spawnY) ? player.spawnY : sampleWalkableHeight(lt.x, lt.z);
+        }
+      }
       this.localNumericId = player.numericId;
       return;
     }

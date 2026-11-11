@@ -402,32 +402,43 @@ export class CloudHuntingRoom extends Room<{
       }
     });
 
-    // 6b. Quick Social Interactions (Wave / Warm Cup Clink / Cheer Sunrise)
+    // 6b. Quick Social Interactions (Wave / Warm Cup Clink / Cheer Sunrise / Gift Flower / Sparkler)
     this.onMessage(
       'social_interact',
       (
         client,
-        payload: { targetSessionId?: string; kind?: 'greet' | 'cheers' | 'cheer' }
+        payload: {
+          targetSessionId?: string;
+          kind?: 'greet' | 'cheers' | 'cheer' | 'gift_flower' | 'sparkler';
+        }
       ) => {
         const ent = this.humanEntities.get(client.sessionId);
         const ps = this.state.players.get(client.sessionId);
         if (!ent || !ps) return;
 
         const now = Date.now();
-        if (now - ent.lastSocialAtMs < 900) return;
+        if (now - ent.lastSocialAtMs < 750) return;
 
         const targetId =
           typeof payload?.targetSessionId === 'string' ? payload.targetSessionId.trim() : '';
         const kind = payload?.kind;
-        if (!targetId || (kind !== 'greet' && kind !== 'cheers' && kind !== 'cheer')) {
+        if (
+          !targetId ||
+          (kind !== 'greet' &&
+            kind !== 'cheers' &&
+            kind !== 'cheer' &&
+            kind !== 'gift_flower' &&
+            kind !== 'sparkler')
+        ) {
           return;
         }
         ent.lastSocialAtMs = now;
 
-        // Check if target is a human peer within 10m
+        // Check if target is a human peer within 18m
         const targetHuman = this.humanEntities.get(targetId);
-        if (!targetHuman) return;
-        if (Math.hypot(targetHuman.x - ent.x, targetHuman.z - ent.z) > 10.5) return;
+        const targetPs = this.state.players.get(targetId);
+        if (!targetHuman || !targetPs) return;
+        if (Math.hypot(targetHuman.x - ent.x, targetHuman.z - ent.z) > 18.5) return;
 
         const midX = (ent.x + targetHuman.x) * 0.5;
         const midY = (ent.y + targetHuman.y) * 0.5 + 1.48;
@@ -435,6 +446,13 @@ export class CloudHuntingRoom extends Room<{
         if (kind === 'cheers') {
           ent.warmBuff = true;
           targetHuman.warmBuff = true;
+        } else if (kind === 'gift_flower') {
+          targetPs.heldItem = 'hydrangea_bouquet';
+          ent.warmBuff = true;
+          targetHuman.warmBuff = true;
+        } else if (kind === 'sparkler') {
+          ps.heldItem = 'sparkler';
+          targetPs.heldItem = 'sparkler';
         }
 
         // Broadcast 3D social sparkle & toast event to nearby clients
@@ -442,6 +460,7 @@ export class CloudHuntingRoom extends Room<{
           fromId: client.sessionId,
           fromName: ps.displayName,
           targetId,
+          targetName: targetPs.displayName,
           kind,
           x: midX,
           y: midY,

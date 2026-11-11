@@ -59,12 +59,16 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
   const activeModal = useGameStore((s) => s.activeModal);
   const nearbyPrompt = useGameStore((s) => s.nearbyPrompt);
   const nearbyPeer = useGameStore((s) => s.nearbyPeer);
+  const selectedPeerSessionId = useGameStore((s) => s.selectedPeerSessionId);
+  const incomingSocialPrompt = useGameStore((s) => s.incomingSocialPrompt);
   const toastBanner = useGameStore((s) => s.toastBanner);
   const lastJamNote = useGameStore((s) => s.lastJamNote);
 
   const setActiveModal = useGameStore((s) => s.setActiveModal);
   const setPhotoMode = useGameStore((s) => s.setPhotoMode);
   const setHeldItem = useGameStore((s) => s.setHeldItem);
+  const setSelectedPeer = useGameStore((s) => s.setSelectedPeer);
+  const setIncomingSocialPrompt = useGameStore((s) => s.setIncomingSocialPrompt);
 
   const [altitudeASL, setAltitudeASL] = useState<number>(() =>
     gameYToASL(useGameStore.getState().localTransient.y)
@@ -73,6 +77,7 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
   const [chatOpen, setChatOpen] = useState(false);
   const [chatText, setChatText] = useState('');
   const [emoteTrayOpen, setEmoteTrayOpen] = useState(false);
+  const [controlsGuideOpen, setControlsGuideOpen] = useState(true);
   const [stillnessFaded, setStillnessFaded] = useState(false);
   const [sunriseWhisper, setSunriseWhisper] = useState(false);
 
@@ -325,6 +330,84 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
         </button>
       </div>
 
+      {/* TOP-RIGHT: Clear Collapsible Controls & Actions Guide */}
+      {activeModal === 'none' && (
+        <div
+          style={{
+            position: 'absolute',
+            top: '18px',
+            right: '18px',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'flex-end',
+            gap: '6px',
+            opacity: hudChromeOpacity,
+            transition: 'opacity 550ms ease',
+            pointerEvents: 'auto',
+            maxWidth: '305px',
+          }}
+        >
+          <button
+            type="button"
+            onClick={() => setControlsGuideOpen((v) => !v)}
+            className="dalat-glass-btn"
+            style={{
+              ...GLASS_PILL_STYLE,
+              borderRadius: '999px',
+              padding: '6px 13px',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '7px',
+              fontSize: '11.5px',
+              color: UI_COLORS.warmAmber,
+              border: `1px solid ${controlsGuideOpen ? 'rgba(243, 195, 130, 0.42)' : UI_COLORS.border}`,
+            }}
+          >
+            <span>⌨️ Hướng dẫn thao tác</span>
+            <span style={{ opacity: 0.65, fontSize: '10px' }}>{controlsGuideOpen ? '▲ Thu gọn' : '▼ Mở xem'}</span>
+          </button>
+
+          {controlsGuideOpen && (
+            <div
+              style={{
+                ...GLASS_PILL_STYLE,
+                borderRadius: '16px',
+                padding: '10px 13px',
+                display: 'flex',
+                flexDirection: 'column',
+                gap: '5px',
+                fontSize: '11.5px',
+                color: UI_COLORS.cream,
+                border: '1px solid rgba(255, 232, 204, 0.22)',
+                lineHeight: 1.4,
+                width: '100%',
+              }}
+            >
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+                <span style={{ color: UI_COLORS.warmAmber, fontFamily: UI_FONTS.mono, fontWeight: 600 }}>WASD / ↑↓←→</span>
+                <span style={{ color: UI_COLORS.mistText }}>Di chuyển • <b style={{ color: UI_COLORS.cream }}>Shift</b> Chạy</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+                <span style={{ color: UI_COLORS.warmAmber, fontFamily: UI_FONTS.mono, fontWeight: 600 }}>Kéo chuột / 2 ngón</span>
+                <span style={{ color: UI_COLORS.mistText }}>Xoay góc nhìn 360°</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+                <span style={{ color: UI_COLORS.warmAmber, fontFamily: UI_FONTS.mono, fontWeight: 600 }}>Cuộn chuột / Space</span>
+                <span style={{ color: UI_COLORS.mistText }}>Thu phóng • Nhảy</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+                <span style={{ color: UI_COLORS.warmAmber, fontFamily: UI_FONTS.mono, fontWeight: 600 }}>Phím [E] / Click</span>
+                <span style={{ color: UI_COLORS.mistText }}>Ngồi ghế, Pha cà phê, Đọc thẻ</span>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '10px' }}>
+                <span style={{ color: UI_COLORS.warmAmber, fontFamily: UI_FONTS.mono, fontWeight: 600 }}>Click người chơi</span>
+                <span style={{ color: UI_COLORS.mistText }}>Chào, Cụng ly, Tặng hoa, Chat</span>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* TOP-CENTER: Poetic Sunrise Whisper Banner & Discovery Toasts */}
       <div
         style={{
@@ -478,47 +561,125 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
           </div>
         )}
 
-        {/* Quick-Meet Social Interaction Bar when encountering another cloud-hunter */}
+        {/* Quick-Meet Social Interaction Bar when encountering or clicking another cloud-hunter */}
         {nearbyPeer && activeModal === 'none' && !chatOpen && (
           <div
             style={{
               ...GLASS_PILL_STYLE,
               borderRadius: '20px',
-              padding: '8px 14px',
-              border: '1px solid rgba(243, 195, 130, 0.42)',
-              boxShadow: '0 8px 26px rgba(10, 14, 24, 0.45), 0 0 18px rgba(243, 195, 130, 0.14)',
+              padding: '10px 15px',
+              border: '1px solid rgba(243, 195, 130, 0.48)',
+              boxShadow: '0 10px 30px rgba(10, 14, 24, 0.52), 0 0 20px rgba(243, 195, 130, 0.16)',
               display: 'flex',
               flexDirection: 'column',
               alignItems: 'center',
-              gap: '6px',
+              gap: '7px',
               pointerEvents: 'auto',
               animation: 'dalatFadeUp 200ms ease',
+              maxWidth: 'min(580px, calc(100vw - 24px))',
             }}
           >
+            {/* Reciprocal Incoming Social Prompt Banner */}
+            {incomingSocialPrompt && incomingSocialPrompt.fromId === nearbyPeer.sessionId && (
+              <div
+                style={{
+                  width: '100%',
+                  padding: '4px 10px',
+                  borderRadius: '999px',
+                  background: 'rgba(243, 195, 130, 0.22)',
+                  border: '1px solid rgba(243, 195, 130, 0.52)',
+                  color: '#FFF3DC',
+                  fontSize: '11.5px',
+                  fontWeight: 500,
+                  textAlign: 'center',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  gap: '6px',
+                }}
+              >
+                <span>
+                  ✨ <b>{incomingSocialPrompt.fromName}</b> vừa{' '}
+                  {incomingSocialPrompt.kind === 'cheers'
+                    ? 'nâng ly cụng ấm cùng bạn'
+                    : incomingSocialPrompt.kind === 'gift_flower'
+                      ? 'tặng hoa Cẩm Tú Cầu cho bạn'
+                      : incomingSocialPrompt.kind === 'sparkler'
+                        ? 'rủ bạn đốt pháo bông'
+                        : incomingSocialPrompt.kind === 'cheer'
+                          ? 'reo vui đón mây cùng bạn'
+                          : 'vẫy tay chào bạn'}{' '}
+                  — Chọn hành động bên dưới để đáp lại!
+                </span>
+              </div>
+            )}
+
             <div
               style={{
                 display: 'flex',
                 alignItems: 'center',
-                gap: '6px',
-                fontSize: '11.5px',
+                justifyContent: 'space-between',
+                width: '100%',
+                gap: '8px',
+                fontSize: '12px',
                 color: UI_COLORS.mistText,
               }}
             >
-              <Users size={12} strokeWidth={2} style={{ color: UI_COLORS.warmAmber }} />
-              <span>Gặp gỡ trên đồi:</span>
-              <span style={{ fontWeight: 600, color: UI_COLORS.warmAmber }}>
-                {nearbyPeer.displayName}
-              </span>
-              <span style={{ opacity: 0.45, fontFamily: UI_FONTS.mono, fontSize: '10.5px' }}>
-                ({nearbyPeer.distance.toFixed(1)}m)
-              </span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                <Users size={13} strokeWidth={2} style={{ color: UI_COLORS.warmAmber }} />
+                <span>Tương tác với:</span>
+                <span style={{ fontWeight: 600, color: UI_COLORS.warmAmber, fontSize: '12.5px' }}>
+                  {nearbyPeer.displayName}
+                </span>
+                <span style={{ opacity: 0.65, fontFamily: UI_FONTS.mono, fontSize: '11px' }}>
+                  ({nearbyPeer.distance.toFixed(1)}m)
+                </span>
+                {nearbyPeer.seatId && (
+                  <span
+                    style={{
+                      padding: '1px 7px',
+                      borderRadius: '999px',
+                      background: 'rgba(255, 255, 255, 0.08)',
+                      fontSize: '10.5px',
+                      color: '#FFE6C2',
+                    }}
+                  >
+                    🪑 Đang ngồi ngắm mây
+                  </span>
+                )}
+              </div>
+
+              {selectedPeerSessionId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedPeer(null);
+                    setIncomingSocialPrompt(null);
+                  }}
+                  className="dalat-glass-btn"
+                  title="Bỏ chọn người chơi này"
+                  style={{
+                    padding: '1px 7px',
+                    borderRadius: '999px',
+                    background: 'rgba(255,255,255,0.06)',
+                    border: `1px solid ${UI_COLORS.border}`,
+                    color: UI_COLORS.mistText,
+                    fontSize: '10.5px',
+                  }}
+                >
+                  ✕
+                </button>
+              )}
             </div>
 
+            {/* Primary Social Action Buttons */}
             <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'center', gap: '6px' }}>
               {[
-                { kind: 'greet' as const, key: 'G', label: '👋 Chào nhau' },
-                { kind: 'cheers' as const, key: 'H', label: '☕ Cụng ly ấm' },
-                { kind: 'cheer' as const, key: 'V', label: '🙌 Reo vui' },
+                { kind: 'greet' as const, key: 'G', label: '👋 Vẫy chào' },
+                { kind: 'cheers' as const, key: 'H', label: '☕ Cụng ly ấm (+8p)', highlight: true },
+                { kind: 'cheer' as const, key: 'V', label: '🙌 Reo đón mây' },
+                { kind: 'gift_flower' as const, key: 'F', label: '💐 Tặng hoa Tú Cầu', highlight: true },
+                { kind: 'sparkler' as const, key: 'B', label: '✨ Đốt pháo bông' },
                 { kind: 'photo' as const, key: 'C', label: '📸 Chụp chung' },
               ].map((btn) => (
                 <button
@@ -529,12 +690,11 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
                   style={{
                     padding: '5px 11px',
                     borderRadius: '999px',
-                    background:
-                      btn.kind === 'cheers'
-                        ? 'rgba(243, 195, 130, 0.2)'
-                        : 'rgba(255, 255, 255, 0.06)',
+                    background: btn.highlight
+                      ? 'rgba(243, 195, 130, 0.2)'
+                      : 'rgba(255, 255, 255, 0.06)',
                     border: `1px solid ${
-                      btn.kind === 'cheers' ? 'rgba(243, 195, 130, 0.48)' : UI_COLORS.border
+                      btn.highlight ? 'rgba(243, 195, 130, 0.48)' : UI_COLORS.border
                     }`,
                     color: UI_COLORS.cream,
                     fontSize: '11.5px',
@@ -549,7 +709,7 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
                       fontSize: '10px',
                       padding: '1px 5px',
                       borderRadius: '5px',
-                      background: 'rgba(243, 195, 130, 0.2)',
+                      background: 'rgba(243, 195, 130, 0.22)',
                       color: UI_COLORS.warmAmber,
                       fontWeight: 600,
                     }}
@@ -559,6 +719,91 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
                   <span>{btn.label}</span>
                 </button>
               ))}
+
+              {/* Sit Together Button if peer is on a 2-seater bench or near benches */}
+              <button
+                type="button"
+                onClick={() => executePeerSocialAction('sit_together', nearbyPeer, net)}
+                className="dalat-glass-btn"
+                style={{
+                  padding: '5px 11px',
+                  borderRadius: '999px',
+                  background: 'rgba(255, 255, 255, 0.06)',
+                  border: `1px solid ${UI_COLORS.border}`,
+                  color: UI_COLORS.cream,
+                  fontSize: '11.5px',
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                }}
+              >
+                <span>🪑 Ngồi cạnh nhau</span>
+              </button>
+            </div>
+
+            {/* 1-Click Quick-Chat Greeting Chips */}
+            <div
+              style={{
+                display: 'flex',
+                flexWrap: 'wrap',
+                justifyContent: 'center',
+                alignItems: 'center',
+                gap: '5px',
+                paddingTop: '3px',
+                borderTop: '1px solid rgba(255, 232, 204, 0.12)',
+                width: '100%',
+              }}
+            >
+              <span style={{ fontSize: '10.5px', color: UI_COLORS.mistText, marginRight: '2px' }}>
+                💬 Nhắn nhanh:
+              </span>
+              {[
+                { short: 'Sương đẹp quá ✨', full: `Sương sớm Đà Lạt hôm nay đẹp quá ${nearbyPeer.displayName} ơi! ✨` },
+                { short: 'Uống sữa nóng không? 🥛', full: `Làm ly sữa đậu nành nóng cho ấm bụng nhé ${nearbyPeer.displayName}! 🥛` },
+                { short: 'Qua ghế đôi ngồi nhé 🪑', full: `Qua ghế gỗ đôi ngồi ngắm biển mây cùng mình nè ${nearbyPeer.displayName}! 🪑` },
+                { short: 'Gảy Guitar lửa trại 🎸', full: `Lại bếp lửa Mơ Sương gảy đàn Guitar cùng nhau đi ${nearbyPeer.displayName}! 🎸🔥` },
+              ].map((preset) => (
+                <button
+                  key={preset.short}
+                  type="button"
+                  onClick={() => {
+                    net.sendChat(preset.full);
+                    useGameStore.getState().showToast(`💬 Đã gửi lời nhắn tới ${nearbyPeer.displayName}`);
+                  }}
+                  className="dalat-glass-btn"
+                  style={{
+                    padding: '3px 9px',
+                    borderRadius: '999px',
+                    background: 'rgba(255, 255, 255, 0.04)',
+                    border: '1px solid rgba(255, 232, 204, 0.18)',
+                    color: '#EFE7DA',
+                    fontSize: '10.5px',
+                  }}
+                >
+                  {preset.short}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setEmoteTrayOpen(false);
+                  setChatText(`@${nearbyPeer.displayName} `);
+                  setChatOpen(true);
+                  setTimeout(() => chatInputRef.current?.focus(), 20);
+                }}
+                className="dalat-glass-btn"
+                style={{
+                  padding: '3px 9px',
+                  borderRadius: '999px',
+                  background: 'rgba(243, 195, 130, 0.16)',
+                  border: '1px solid rgba(243, 195, 130, 0.38)',
+                  color: UI_COLORS.warmAmber,
+                  fontSize: '10.5px',
+                  fontWeight: 500,
+                }}
+              >
+                ✏️ Tự gõ lời nhắn...
+              </button>
             </div>
           </div>
         )}
@@ -573,8 +818,8 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
               ...GLASS_PILL_STYLE,
               borderRadius: '999px',
               padding: '9px 18px',
-              border: '1px solid rgba(243, 195, 130, 0.45)',
-              boxShadow: '0 8px 28px rgba(10, 14, 24, 0.45), 0 0 18px rgba(243, 195, 130, 0.16)',
+              border: '1px solid rgba(243, 195, 130, 0.5)',
+              boxShadow: '0 8px 28px rgba(10, 14, 24, 0.45), 0 0 18px rgba(243, 195, 130, 0.18)',
               display: 'flex',
               alignItems: 'center',
               gap: '10px',
@@ -584,17 +829,17 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
           >
             <span
               style={{
-                padding: '2px 7px',
-                borderRadius: '6px',
-                background: 'rgba(243, 195, 130, 0.22)',
-                border: '1px solid rgba(243, 195, 130, 0.5)',
+                padding: '3px 8px',
+                borderRadius: '7px',
+                background: 'rgba(243, 195, 130, 0.25)',
+                border: '1px solid rgba(243, 195, 130, 0.55)',
                 color: UI_COLORS.warmAmber,
                 fontFamily: UI_FONTS.mono,
                 fontSize: '11.5px',
                 fontWeight: 600,
               }}
             >
-              E
+              Phím E / Click
             </span>
             <div style={{ textAlign: 'left' }}>
               <div style={{ fontSize: '13px', fontWeight: 500, color: UI_COLORS.cream }}>
@@ -754,6 +999,8 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
             borderRadius: '999px',
             padding: '6px 10px',
             display: 'flex',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
             alignItems: 'center',
             gap: '4px',
             opacity: hudChromeOpacity,
@@ -762,8 +1009,8 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
           }}
         >
           <DockIconButton
-            icon={<MessageCircle size={16} strokeWidth={1.75} />}
-            label="Trò chuyện"
+            icon={<MessageCircle size={15} strokeWidth={1.75} />}
+            label="Chat"
             shortcut="Enter"
             active={chatOpen}
             onClick={() => {
@@ -776,8 +1023,8 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
             }}
           />
           <DockIconButton
-            icon={<Smile size={16} strokeWidth={1.75} />}
-            label="Biểu cảm & Đạo cụ"
+            icon={<Smile size={15} strokeWidth={1.75} />}
+            label="Đạo cụ"
             shortcut="Tab"
             active={emoteTrayOpen}
             onClick={() => {
@@ -786,8 +1033,8 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
             }}
           />
           <DockIconButton
-            icon={<Camera size={16} strokeWidth={1.75} />}
-            label="Máy ảnh Film"
+            icon={<Camera size={15} strokeWidth={1.75} />}
+            label="Máy ảnh"
             shortcut="P"
             active={false}
             highlight
@@ -800,41 +1047,41 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
             }}
           />
           <DockIconButton
-            icon={<MapIcon size={16} strokeWidth={1.75} />}
-            label="Bản đồ Sổ tay"
+            icon={<MapIcon size={15} strokeWidth={1.75} />}
+            label="Bản đồ"
             shortcut="M"
             active={activeModal === 'map'}
             onClick={() => toggleModal('map')}
           />
           <DockIconButton
-            icon={<BookOpen size={16} strokeWidth={1.75} />}
-            label="Sổ tay Săn mây"
+            icon={<BookOpen size={15} strokeWidth={1.75} />}
+            label="Sổ tay"
             shortcut="J"
             active={activeModal === 'almanac'}
             onClick={() => toggleModal('almanac')}
           />
           <DockIconButton
-            icon={<Shirt size={16} strokeWidth={1.75} />}
-            label="Tủ đồ Áo ấm"
+            icon={<Shirt size={15} strokeWidth={1.75} />}
+            label="Tủ đồ"
             shortcut="O"
             active={false}
             onClick={() => toggleModal('wardrobe')}
           />
           <DockIconButton
-            icon={<Sparkles size={16} strokeWidth={1.75} />}
-            label="Bảng ảnh Polaroid"
+            icon={<Sparkles size={15} strokeWidth={1.75} />}
+            label="Ảnh chung"
             active={activeModal === 'polaroids'}
             onClick={() => toggleModal('polaroids')}
           />
           <DockIconButton
-            icon={<Music size={16} strokeWidth={1.75} />}
-            label="Thẻ ước nguyện"
+            icon={<Music size={15} strokeWidth={1.75} />}
+            label="Ước nguyện"
             active={activeModal === 'windchimes'}
             onClick={() => toggleModal('windchimes')}
           />
           <DockIconButton
-            icon={<SlidersHorizontal size={16} strokeWidth={1.75} />}
-            label="Cài đặt & Giờ Khí Tượng"
+            icon={<SlidersHorizontal size={15} strokeWidth={1.75} />}
+            label="Giờ & Mây"
             active={activeModal === 'settings'}
             onClick={() => toggleModal('settings')}
           />
@@ -862,7 +1109,7 @@ function DockIconButton(props: {
       aria-label={label}
       className="dalat-glass-btn"
       style={{
-        padding: '8px 11px',
+        padding: '7px 11px',
         borderRadius: '999px',
         background: active
           ? 'rgba(243, 195, 130, 0.24)'
@@ -879,17 +1126,21 @@ function DockIconButton(props: {
         color: active || highlight ? UI_COLORS.warmAmber : UI_COLORS.cream,
         display: 'inline-flex',
         alignItems: 'center',
-        gap: '6px',
-        fontSize: '12px',
+        gap: '5px',
+        fontSize: '11.5px',
       }}
     >
       {icon}
+      <span style={{ fontWeight: 500 }}>{label}</span>
       {shortcut && (
         <span
           style={{
             fontFamily: UI_FONTS.mono,
-            fontSize: '10px',
-            opacity: 0.72,
+            fontSize: '9.5px',
+            padding: '1px 4px',
+            borderRadius: '4px',
+            background: 'rgba(255, 255, 255, 0.08)',
+            opacity: 0.82,
           }}
         >
           {shortcut}

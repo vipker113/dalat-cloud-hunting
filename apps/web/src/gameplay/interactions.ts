@@ -161,21 +161,47 @@ export function isNearCampfireStage(px: number, pz: number): boolean {
 }
 
 /**
- * Finds the closest fellow cloud-hunter or ambient hiker within quick-greeting proximity (<= 5.6m).
+ * Finds the selected or closest fellow cloud-hunter within greeting proximity (<= 9.5m auto, <= 18m when clicked).
  */
 export function evaluateNearbyPeer(
   px: number,
   py: number,
   pz: number
 ): NearbyPeerInfo | null {
-  const peers = useGameStore.getState().peers;
+  const st = useGameStore.getState();
+  const peers = st.peers;
+
+  // 1. Prioritize explicitly clicked/focused peer if still within 18m
+  if (st.selectedPeerSessionId) {
+    const sel = peers[st.selectedPeerSessionId];
+    if (sel && Math.abs(sel.y - py) <= 4.5) {
+      const selDist = dist2D(px, pz, sel.x, sel.z);
+      if (selDist <= 18.0) {
+        return {
+          sessionId: sel.sessionId,
+          displayName: sel.displayName,
+          isBot: sel.isBot,
+          heldItem: sel.heldItem,
+          emote: sel.emote,
+          seatId: sel.seatId,
+          x: Math.round(sel.x * 10) / 10,
+          y: Math.round(sel.y * 10) / 10,
+          z: Math.round(sel.z * 10) / 10,
+          distance: Math.round(selDist * 10) / 10,
+        };
+      }
+    }
+    st.setSelectedPeer(null);
+  }
+
+  // 2. Otherwise auto-detect the closest nearby player within 9.5m
   let closest: NearbyPeerInfo | null = null;
-  let bestDist = 5.6;
+  let bestDist = 9.5;
 
   for (const sessionId in peers) {
     const p = peers[sessionId];
     if (!p) continue;
-    if (Math.abs(p.y - py) > 2.8) continue;
+    if (Math.abs(p.y - py) > 3.4) continue;
     const d = dist2D(px, pz, p.x, p.z);
     if (d <= bestDist) {
       bestDist = d;
@@ -185,6 +211,7 @@ export function evaluateNearbyPeer(
         isBot: p.isBot,
         heldItem: p.heldItem,
         emote: p.emote,
+        seatId: p.seatId,
         x: Math.round(p.x * 10) / 10,
         y: Math.round(p.y * 10) / 10,
         z: Math.round(p.z * 10) / 10,
@@ -196,12 +223,19 @@ export function evaluateNearbyPeer(
   return closest;
 }
 
-export type PeerSocialActionKind = 'greet' | 'cheers' | 'cheer' | 'photo';
+export type PeerSocialActionKind =
+  | 'greet'
+  | 'cheers'
+  | 'cheer'
+  | 'gift_flower'
+  | 'sparkler'
+  | 'photo'
+  | 'sit_together';
 
 let lastSocialChatMs = 0;
 
 /**
- * Executes a cozy quick-social interaction with a nearby cloud-hunter (human or ambient hiker).
+ * Executes a cozy quick-social interaction with a nearby cloud-hunter.
  */
 export function executePeerSocialAction(
   kind: PeerSocialActionKind,
@@ -211,6 +245,11 @@ export function executePeerSocialAction(
   const st = useGameStore.getState();
   const lt = st.localTransient;
   const livePeer = st.peers[peerSnapshot.sessionId] ?? peerSnapshot;
+
+  // Clear incoming prompt once we interact back
+  if (st.incomingSocialPrompt?.fromId === livePeer.sessionId) {
+    st.setIncomingSocialPrompt(null);
+  }
 
   const dx = livePeer.x - lt.x;
   const dz = livePeer.z - lt.z;
@@ -227,7 +266,7 @@ export function executePeerSocialAction(
     playTemporaryEmote('wave', net, 3600);
     st.triggerSocialSparkle('greet', midX, midY, midZ);
     net.sendSocialInteract(livePeer.sessionId, 'greet');
-    if (now - lastSocialChatMs > 2600) {
+    if (now - lastSocialChatMs > 2200) {
       lastSocialChatMs = now;
       net.sendChat(`Chào ${livePeer.displayName} nhé! Sương sớm Cầu Đất đẹp quá ✨`);
     }
@@ -244,12 +283,12 @@ export function executePeerSocialAction(
     playTemporaryEmote('cheers_cup', net, 3900);
     st.triggerSocialSparkle('cheers', midX, midY + 0.1, midZ);
     net.sendSocialInteract(livePeer.sessionId, 'cheers');
-    if (now - lastSocialChatMs > 2600) {
+    if (now - lastSocialChatMs > 2200) {
       lastSocialChatMs = now;
       net.sendChat(`Cụng ly ấm nhé ${livePeer.displayName}! ☕✨`);
     }
     st.showToast(
-      `☕ Cụng ly ấm cùng ${livePeer.displayName} — Giữ ấm +8 phút (+12% bước chân)!`
+      `☕ Cụng ly ấm cùng ${livePeer.displayName} — Cả hai giữ ấm +8 phút (+12% bước chân)!`
     );
     return;
   }
@@ -258,11 +297,92 @@ export function executePeerSocialAction(
     playTemporaryEmote('cheer_sunrise', net, 4000);
     st.triggerSocialSparkle('cheer', midX, midY + 0.18, midZ);
     net.sendSocialInteract(livePeer.sessionId, 'cheer');
-    if (now - lastSocialChatMs > 2600) {
+    if (now - lastSocialChatMs > 2200) {
       lastSocialChatMs = now;
       net.sendChat(`Tuyệt vời quá ${livePeer.displayName} ơi, biển mây hôm nay đỉnh thật! 🌅`);
     }
     st.showToast(`🙌 Cùng ${livePeer.displayName} reo đón biển mây Đà Lạt!`);
+    return;
+  }
+
+  if (kind === 'gift_flower') {
+    st.setHeldItem('hydrangea_bouquet');
+    net.sendHeldItem('hydrangea_bouquet');
+    st.grantWarmthBuff(480);
+    playTemporaryEmote('wave', net, 3600);
+    st.triggerSocialSparkle('gift_flower', midX, midY + 0.12, midZ);
+    net.sendSocialInteract(livePeer.sessionId, 'gift_flower');
+    if (now - lastSocialChatMs > 2200) {
+      lastSocialChatMs = now;
+      net.sendChat(`Tặng ${livePeer.displayName} bó hoa Cẩm Tú Cầu Đà Lạt sương sớm nè! 💐✨`);
+    }
+    st.showToast(`💐 Đã trao tặng hoa Cẩm Tú Cầu cho ${livePeer.displayName}!`);
+    return;
+  }
+
+  if (kind === 'sparkler') {
+    st.setHeldItem('sparkler');
+    net.sendHeldItem('sparkler');
+    playTemporaryEmote('cheer_sunrise', net, 3800);
+    st.triggerSocialSparkle('sparkler', midX, midY + 0.16, midZ);
+    net.sendSocialInteract(livePeer.sessionId, 'sparkler');
+    if (now - lastSocialChatMs > 2200) {
+      lastSocialChatMs = now;
+      net.sendChat(`Cùng thắp pháo bông giữa sương mờ nhé ${livePeer.displayName}! ✨🎇`);
+    }
+    st.showToast(`✨ Cùng ${livePeer.displayName} thắp sáng pháo bông Đà Lạt!`);
+    return;
+  }
+
+  if (kind === 'sit_together') {
+    const peerSeatId = livePeer.seatId || '';
+    const baseBenchId = peerSeatId.split(':')[0];
+    if (baseBenchId) {
+      const targetSlotId = peerSeatId.endsWith(':0') ? `${baseBenchId}:1` : `${baseBenchId}:0`;
+      const seatTransform = resolveBenchSeatTransform(targetSlotId);
+      if (seatTransform) {
+        lt.x = seatTransform.position[0];
+        lt.y = seatTransform.position[1];
+        lt.z = seatTransform.position[2];
+        lt.vx = 0;
+        lt.vy = 0;
+        lt.vz = 0;
+        lt.moving = false;
+        lt.running = false;
+        lt.yaw = seatTransform.yaw;
+        st.setSeatedBench(seatTransform.seatId);
+        net.requestBenchSeat(seatTransform.seatId);
+        st.showToast(`🪑 Đã ngồi cạnh ${livePeer.displayName} trên ${seatTransform.bench.label}!`);
+        return;
+      }
+    }
+    // Or find the nearest bench with a free slot within 8m
+    for (const bench of SHARED_BENCHES) {
+      if (dist2D(lt.x, lt.z, bench.position[0], bench.position[2]) <= 8.5) {
+        const occ0 = st.occupiedBenches[`${bench.id}:0`];
+        const occ1 = st.occupiedBenches[`${bench.id}:1`];
+        const freeSlot = !occ0 ? `${bench.id}:0` : !occ1 ? `${bench.id}:1` : null;
+        if (freeSlot) {
+          const seatTransform = resolveBenchSeatTransform(freeSlot);
+          if (seatTransform) {
+            lt.x = seatTransform.position[0];
+            lt.y = seatTransform.position[1];
+            lt.z = seatTransform.position[2];
+            lt.vx = 0;
+            lt.vy = 0;
+            lt.vz = 0;
+            lt.moving = false;
+            lt.running = false;
+            lt.yaw = seatTransform.yaw;
+            st.setSeatedBench(seatTransform.seatId);
+            net.requestBenchSeat(seatTransform.seatId);
+            net.sendChat(`Qua ngồi ghế gỗ ngắm mây cùng mình nè ${livePeer.displayName} ơi! 🪑✨`);
+            st.showToast(`🪑 Đã ngồi tại ${seatTransform.bench.label} và mời ${livePeer.displayName} ngồi cùng!`);
+            return;
+          }
+        }
+      }
+    }
     return;
   }
 
@@ -276,9 +396,6 @@ export function executePeerSocialAction(
     }
     st.setPhotoOptions({ photoFocalMm: 50, photoHideCrowd: false });
     if (Math.hypot(dx, dz) > 0.05) {
-      // Third-person camera looks toward (-sin(cameraYaw), -cos(cameraYaw)), and Photo Mode adds +PI on entry
-      // Wait: lookDir in Photo Mode is (+sin(yaw+PI), -cos(yaw+PI)) = (-sin(yaw), +cos(yaw))!
-      // Let's set cameraYaw so after +PI flip: sin(yaw+PI) = dx/d and -cos(yaw+PI) = dz/d => yaw+PI = atan2(dx, -dz) => yaw = atan2(dx, -dz) - PI!
       lt.cameraYaw = Math.atan2(dx, -dz) - Math.PI;
       lt.cameraPitch = 0.04;
     }

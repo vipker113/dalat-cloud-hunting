@@ -45,12 +45,64 @@ function getWorldLabelsContainer(): HTMLElement | null {
   return document.getElementById('dalat-world-labels');
 }
 
+function heldItemBadgeIcon(item: RemotePeerState['heldItem']): string {
+  switch (item) {
+    case 'soy_milk':
+      return '🥛';
+    case 'phin_coffee':
+      return '☕';
+    case 'roasted_corn':
+      return '🌽';
+    case 'sweet_potato':
+      return '🍠';
+    case 'hydrangea_bouquet':
+      return '💐';
+    case 'da_quy_bouquet':
+      return '🌼';
+    case 'film_camera':
+      return '📸';
+    case 'lantern':
+      return '🏮';
+    case 'sparkler':
+      return '✨';
+    case 'guitar':
+      return '🎸';
+    default:
+      return '';
+  }
+}
+
 function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
   const groupRef = useRef<THREE.Group>(null);
   const labelElRef = useRef<HTMLDivElement | null>(null);
+  const pillElRef = useRef<HTMLDivElement | null>(null);
   const bubbleElRef = useRef<HTMLDivElement | null>(null);
   const initializedRef = useRef(false);
   const { camera, size } = useThree();
+  const isSelected = useGameStore(
+    (s) => s.selectedPeerSessionId === slot.sessionId || s.nearbyPeer?.sessionId === slot.sessionId
+  );
+
+  const selectThisPeer = () => {
+    const st = useGameStore.getState();
+    const peer = st.peers[slot.sessionId];
+    if (!peer) return;
+    st.setSelectedPeer(slot.sessionId);
+    const lt = st.localTransient;
+    const d = Math.hypot(peer.x - lt.x, peer.z - lt.z);
+    st.setNearbyPeer({
+      sessionId: peer.sessionId,
+      displayName: peer.displayName,
+      isBot: peer.isBot,
+      heldItem: peer.heldItem,
+      emote: peer.emote,
+      seatId: peer.seatId,
+      x: Math.round(peer.x * 10) / 10,
+      y: Math.round(peer.y * 10) / 10,
+      z: Math.round(peer.z * 10) / 10,
+      distance: Math.round(d * 10) / 10,
+    });
+  };
 
   const latestBubble = useGameStore((s) => {
     for (let i = s.chatBubbles.length - 1; i >= 0; i--) {
@@ -73,17 +125,25 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
 
     const bubble = document.createElement('div');
     bubble.style.cssText =
-      'display:none;max-width:230px;padding:6px 12px;border-radius:14px;background:rgba(252,247,238,0.94);color:#1D2432;font-size:12.5px;font-weight:500;line-height:1.38;box-shadow:0 6px 20px rgba(8,12,22,0.35);border:1px solid rgba(255,222,178,0.65);text-align:center;word-break:break-word;';
+      'display:none;max-width:240px;padding:6px 12px;border-radius:14px;background:rgba(252,247,238,0.96);color:#1D2432;font-size:12.5px;font-weight:500;line-height:1.38;box-shadow:0 6px 20px rgba(8,12,22,0.35);border:1px solid rgba(255,222,178,0.65);text-align:center;word-break:break-word;';
 
     const pill = document.createElement('div');
+    pill.setAttribute('data-dalat-peer-pill', 'true');
+    pill.title = `Click để tương tác với ${slot.displayName}`;
     pill.style.cssText =
-      'display:inline-flex;align-items:center;gap:5px;padding:2.5px 9px;border-radius:999px;background:rgba(16,23,36,0.66);border:1px solid rgba(255,232,204,0.18);color:#F6EFE4;font-size:11px;font-weight:500;letter-spacing:0.01em;white-space:nowrap;';
+      'display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;background:rgba(16,23,36,0.78);border:1px solid rgba(255,232,204,0.28);color:#F6EFE4;font-size:11.5px;font-weight:500;letter-spacing:0.01em;white-space:nowrap;pointer-events:auto;cursor:pointer;transition:transform 140ms ease,border-color 140ms ease,box-shadow 140ms ease;';
+
+    pill.addEventListener('click', (e) => {
+      e.stopPropagation();
+      selectThisPeer();
+    });
 
     const dot = document.createElement('span');
-    dot.style.cssText = `width:5px;height:5px;border-radius:50%;background:${slot.isBot ? '#A8C5DA' : '#F3C382'};`;
+    dot.style.cssText = `width:6px;height:6px;border-radius:50%;background:${slot.isBot ? '#A8C5DA' : '#82D69E'};box-shadow:0 0 6px rgba(130,214,158,0.8);`;
 
     const nameSpan = document.createElement('span');
-    nameSpan.textContent = slot.displayName;
+    const propIcon = heldItemBadgeIcon(slot.heldItem);
+    nameSpan.textContent = propIcon ? `${slot.displayName} ${propIcon}` : slot.displayName;
 
     pill.appendChild(dot);
     pill.appendChild(nameSpan);
@@ -92,14 +152,30 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     host.appendChild(wrap);
 
     labelElRef.current = wrap;
+    pillElRef.current = pill;
     bubbleElRef.current = bubble;
 
     return () => {
       wrap.remove();
       labelElRef.current = null;
+      pillElRef.current = null;
       bubbleElRef.current = null;
     };
-  }, [slot.displayName, slot.isBot]);
+  }, [slot.displayName, slot.heldItem, slot.isBot]);
+
+  useEffect(() => {
+    const pill = pillElRef.current;
+    if (!pill) return;
+    if (isSelected) {
+      pill.style.borderColor = '#F3C382';
+      pill.style.boxShadow = '0 0 14px rgba(243,195,130,0.45)';
+      pill.style.background = 'rgba(28, 36, 54, 0.92)';
+    } else {
+      pill.style.borderColor = 'rgba(255,232,204,0.28)';
+      pill.style.boxShadow = 'none';
+      pill.style.background = 'rgba(16,23,36,0.78)';
+    }
+  }, [isSelected]);
 
   useEffect(() => {
     const bEl = bubbleElRef.current;
@@ -268,7 +344,13 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
   });
 
   return (
-    <group ref={groupRef}>
+    <group
+      ref={groupRef}
+      onClick={(e) => {
+        e.stopPropagation();
+        selectThisPeer();
+      }}
+    >
       <HighlandAvatar
         outfit={slot.outfit}
         heldItem={slot.heldItem}
