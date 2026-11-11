@@ -252,29 +252,43 @@ async function serveStaticWebAsset(req: Request): Promise<Response> {
   });
 }
 
+function isBackendApiRoute(pathname: string): boolean {
+  return (
+    pathname === '/health' ||
+    pathname === '/__healthcheck' ||
+    pathname.startsWith('/api/') ||
+    pathname.startsWith('/matchmake/')
+  );
+}
+
 const originalBindRouter = transport.bindRouter.bind(transport);
 transport.bindRouter = (router: any) => {
   const wrappedRouter = {
     ...router,
     findRoute(method: string, pathname: string) {
-      const matched = router.findRoute(method, pathname);
-      if (matched !== undefined) return matched;
+      if (isBackendApiRoute(pathname)) {
+        return router.findRoute(method, pathname);
+      }
       if (
         (method === 'GET' || method === 'HEAD') &&
-        !pathname.startsWith('/api/') &&
-        !pathname.startsWith('/matchmake/') &&
         existsSync(STATIC_WEB_DIST_DIR)
       ) {
         return { staticWebFallback: true };
       }
-      return undefined;
+      return router.findRoute(method, pathname);
     },
     async handler(req: Request) {
       const url = new URL(req.url);
-      if (router.findRoute(req.method, url.pathname) !== undefined) {
+      if (isBackendApiRoute(url.pathname)) {
         return router.handler(req);
       }
-      return serveStaticWebAsset(req);
+      if (
+        (req.method === 'GET' || req.method === 'HEAD') &&
+        existsSync(STATIC_WEB_DIST_DIR)
+      ) {
+        return serveStaticWebAsset(req);
+      }
+      return router.handler(req);
     },
   };
   originalBindRouter(wrappedRouter);
