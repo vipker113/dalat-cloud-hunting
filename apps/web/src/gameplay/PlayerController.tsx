@@ -2,18 +2,20 @@ import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
 import { useFrame, useThree } from '@react-three/fiber';
 import {
+  distanceToTrail,
   getSurfaceType,
   LANDMARK_LIST,
-  resolveBenchSeatTransform,
+  sampleGroundGradient,
   sampleGroundHeight,
   sampleWalkableHeight,
-  SHARED_BENCHES,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
+import { playLandingFootstep, playStrideFootstep } from '../audio/highlandAudio';
 import type { IMultiplayerController } from '../network/types';
 import { useGameStore } from '../store/gameStore';
 import { worldColliderRegistry } from '../world/colliderRegistry';
 import {
+  computeBenchStandUpPosition,
   evaluateNearbyPeer,
   evaluateNearbyPrompt,
   executeInteractPrompt,
@@ -37,6 +39,8 @@ const _capPt = new THREE.Vector3();
 const _pushDir = new THREE.Vector3();
 const _triNorm = new THREE.Vector3();
 const _camPivot = new THREE.Vector3();
+const _camRayOrigin = new THREE.Vector3();
+const _camRayDir = new THREE.Vector3();
 const _camDesired = new THREE.Vector3();
 const _camLookAt = new THREE.Vector3();
 const _photoOffset = new THREE.Vector3();
@@ -62,14 +66,50 @@ function isTypingInInput(): boolean {
   return tag === 'INPUT' || tag === 'TEXTAREA' || (el as HTMLElement).isContentEditable;
 }
 
+function decodeTelexKeyFromComposedChar(rawKey: string): string {
+  const nfd = rawKey.normalize('NFD');
+  // 1. Tone marks always correspond to the most recently pressed Telex modifier key (s/f/r/x/j)
+  if (nfd.includes('\u0301')) return 'KeyS'; // sắc
+  if (nfd.includes('\u0300')) return 'KeyF'; // huyền
+  if (nfd.includes('\u0309')) return 'KeyR'; // hỏi
+  if (nfd.includes('\u0303')) return 'KeyX'; // ngã
+  if (nfd.includes('\u0323')) return 'KeyJ'; // nặng
+  // 2. Dyed consonant stroke (dd -> đ)
+  if (rawKey === 'đ') return 'KeyD';
+  // 3. Horn (ư, ơ) or breve (ă) triggered by W
+  if (nfd.includes('\u031b') || nfd.includes('\u0306')) return 'KeyW';
+  // 4. Circumflex (aa -> â, ee -> ê, oo -> ô)
+  if (nfd.startsWith('a')) return 'KeyA';
+  if (nfd.startsWith('e')) return 'KeyE';
+  if (nfd.startsWith('o')) return 'KeyO';
+  return '';
+}
+
 /**
  * Resolves a physical gameplay key code even when a Vietnamese IME
- * (Unikey, EVKey, OpenKey on Windows, or macOS/Linux Vietnamese Telex/VNI)
- * intercepts WASD and emits composed characters ('ư', 'ă', 'â', 'đ', 'ứ', 'á', etc.)
- * or VK_PACKET (keyCode 229 / code '' / 'Unidentified').
+ * (EVKey, OpenKey, GoTiengViet on macOS via CGEventKeyboardSetUnicodeString virtualKey=0='KeyA',
+ * Unikey on Windows, or built-in macOS/Windows Vietnamese Telex/VNI) intercepts WASD and emits
+ * composed characters ('ư', 'ă', 'â', 'đ', 'ứ', 'á', etc.) or VK_PACKET (keyCode 229).
  */
 function resolveGameKeyCode(e: KeyboardEvent): string {
-  const code = e.code;
+  const code = e.code || '';
+  const rawKey = (e.key || '').toLowerCase();
+
+  // 1. Detect EVKey / OpenKey macOS CGEventKeyboardSetUnicodeString injection:
+  // macOS Carbon virtualKey 0 is kVK_ANSI_A ('KeyA'), so synthetic Unicode chars ('ư', 'đ', 'ă', 'ứ')
+  // and Telex undo chars ('w', 's', 'd' after Backspace) arrive with code === 'KeyA'!
+  if (rawKey.length === 1 && rawKey.charCodeAt(0) > 127) {
+    if (code && code !== 'KeyA' && code !== 'Unidentified' && code.startsWith('Key')) {
+      return code;
+    }
+    const decoded = decodeTelexKeyFromComposedChar(rawKey);
+    if (decoded) return decoded;
+  }
+  if (code === 'KeyA' && rawKey.length === 1 && /^[b-z0-9]$/.test(rawKey)) {
+    return /^[b-z]$/.test(rawKey) ? `Key${rawKey.toUpperCase()}` : `Digit${rawKey}`;
+  }
+
+  // 2. Trust genuine physical USB HID e.code
   if (
     code &&
     code !== 'Unidentified' &&
@@ -84,7 +124,7 @@ function resolveGameKeyCode(e: KeyboardEvent): string {
     return code;
   }
 
-  // Fallback to legacy hardware virtual keyCode if available and not IME Process (229)
+  // 3. Fallback to legacy hardware virtual keyCode if available and not IME Process (229)
   const kc = e.keyCode || e.which;
   if (kc && kc !== 229 && kc !== 231) {
     switch (kc) {
@@ -135,7 +175,6 @@ function resolveGameKeyCode(e: KeyboardEvent): string {
     }
   }
 
-  const rawKey = (e.key || '').toLowerCase();
   if (!rawKey || rawKey === 'process' || rawKey === 'dead' || rawKey === 'unidentified') {
     return '';
   }
@@ -148,34 +187,11 @@ function resolveGameKeyCode(e: KeyboardEvent): string {
   if (rawKey === 'arrowleft') return 'ArrowLeft';
   if (rawKey === 'arrowright') return 'ArrowRight';
 
-  // Vietnamese Telex / VNI character decoding (used only when hardware e.code is unavailable):
-  const nfd = rawKey.normalize('NFD');
-  if (rawKey === 'w' || rawKey === 'ư' || rawKey === 'ứ' || rawKey === 'ừ' || rawKey === 'ử' || rawKey === 'ữ' || rawKey === 'ự') {
-    return 'KeyW';
+  if (rawKey.length === 1 && rawKey.charCodeAt(0) > 127) {
+    const decoded = decodeTelexKeyFromComposedChar(rawKey);
+    if (decoded) return decoded;
   }
-  if (rawKey === 's' || nfd.includes('\u0301')) {
-    return 'KeyS';
-  }
-  if (nfd.includes('\u031b') || nfd.includes('\u0306')) {
-    return 'KeyW';
-  }
-  if (rawKey === 'd' || rawKey === 'đ') {
-    return 'KeyD';
-  }
-  if (rawKey === 'a' || nfd.startsWith('a')) {
-    return 'KeyA';
-  }
-  if (rawKey === 'e' || nfd.startsWith('e')) return 'KeyE';
-  if (rawKey === 'g') return 'KeyG';
-  if (rawKey === 'h') return 'KeyH';
-  if (rawKey === 'v') return 'KeyV';
-  if (rawKey === 'f' || nfd.includes('\u0300')) return 'KeyF';
-  if (rawKey === 'b') return 'KeyB';
-  if (rawKey === 'c') return 'KeyC';
-  if (rawKey === 'p') return 'KeyP';
-  if (rawKey === 'm') return 'KeyM';
-  if (rawKey === 'j') return 'KeyJ';
-  if (rawKey === 'o' || nfd.startsWith('o')) return 'KeyO';
+  if (/^[a-z]$/.test(rawKey)) return `Key${rawKey.toUpperCase()}`;
   if (/^[1-6]$/.test(rawKey)) return `Digit${rawKey}`;
 
   return code || '';
@@ -216,6 +232,9 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     initialized: false,
   });
 
+  const camActualDistRef = useRef(4.35);
+  const wasAirborneRef = useRef(false);
+
   const timersRef = useRef({
     lastNetSendMs: 0,
     moveSeq: 0,
@@ -231,10 +250,19 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     coyoteTimerSec: 0.14,
     jumpBufferSec: 0,
     lastLensWheelMs: 0,
+    strideDistAccum: 0.52,
+    strideLeftFoot: false,
+    stridePhaseRad: 0,
+    gpBtnPrev: [false, false, false, false] as [boolean, boolean, boolean, boolean],
   });
 
   useEffect(() => {
+    let lastBackspaceMs = -1000;
+    let lastImeBurstMs = -1000;
+    let pendingSyntheticAKeyUp = false;
+
     const clearAllKeys = () => {
+      pendingSyntheticAKeyUp = false;
       keysRef.current.forward = false;
       keysRef.current.backward = false;
       keysRef.current.left = false;
@@ -252,41 +280,105 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         return;
       }
 
-      const st = useGameStore.getState();
-      const code = resolveGameKeyCode(e);
+      const now = performance.now();
+      const rawKey = (e.key || '').toLowerCase();
+      const hwCode = e.code || '';
+      const isComposing = Boolean(e.isComposing || e.keyCode === 229 || e.which === 229);
+      const isNonAsciiChar = rawKey.length === 1 && rawKey.charCodeAt(0) > 127;
+      const isCarbonVirtualZeroInjection =
+        hwCode === 'KeyA' && rawKey.length === 1 && rawKey !== 'a';
+      const isBackspace = hwCode === 'Backspace' || rawKey === 'backspace';
+      const isImeSynthetic =
+        isComposing || isNonAsciiChar || isCarbonVirtualZeroInjection || isBackspace;
 
-      // Prevent IME composition or macOS Press-and-Hold popup when walking/playing outside text inputs
-      if (!e.ctrlKey && !e.metaKey && (e.keyCode === 229 || code.startsWith('Key') || code.startsWith('Arrow'))) {
+      if (isBackspace) {
+        lastBackspaceMs = now;
+      } else if (hwCode === 'KeyA' && rawKey === 'a' && now - lastBackspaceMs < 12) {
+        // Exact 1-for-1 match for EVKey/OpenKey 'â + a -> aa' undo (Backspace + synthetic 'a' down + synthetic 'a' up)
+        pendingSyntheticAKeyUp = true;
+      }
+      if (isImeSynthetic) {
+        lastImeBurstMs = now;
+      }
+
+      const st = useGameStore.getState();
+      const activeEl = document.activeElement as HTMLElement | null;
+      const isButtonFocused = Boolean(
+        activeEl &&
+          (activeEl.tagName === 'BUTTON' ||
+            activeEl.getAttribute('role') === 'button' ||
+            activeEl.closest?.('button, [role="button"]'))
+      );
+      const code = resolveGameKeyCode(e);
+      const canWalk = st.hasEnteredWorld && st.activeModal === 'none' && !st.chatDrawerOpen;
+      const shiftHeld = Boolean(e.shiftKey || e.getModifierState?.('Shift'));
+
+      const isMoveCode =
+        code === 'KeyW' ||
+        code === 'KeyA' ||
+        code === 'KeyS' ||
+        code === 'KeyD' ||
+        code.startsWith('Arrow');
+
+      // Always preventDefault on WASD / Arrow / Shift / IME-Backspace when free-roaming (EVEN during isComposing!)
+      // so macOS Press-and-Hold & built-in Vietnamese Telex preedit never interrupt key-repeat or swallow keys!
+      if (
+        canWalk &&
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        (isMoveCode ||
+          code === 'ShiftLeft' ||
+          code === 'ShiftRight' ||
+          (isBackspace && now - lastImeBurstMs < 60))
+      ) {
         e.preventDefault();
       }
 
-      if (code === 'KeyW' || code === 'ArrowUp') {
-        keysRef.current.forward = true;
+      if (canWalk) {
+        // Release residual mouse-click focus on HUD buttons once the player starts walking so Space jumps cleanly
+        if (isMoveCode && isButtonFocused) {
+          activeEl?.blur();
+        }
+        if (code === 'KeyW' || code === 'ArrowUp') {
+          keysRef.current.forward = true;
+        }
+        if (code === 'KeyS' || code === 'ArrowDown') {
+          keysRef.current.backward = true;
+        }
+        if (code === 'KeyA' || code === 'ArrowLeft') {
+          keysRef.current.left = true;
+        }
+        if (code === 'KeyD' || code === 'ArrowRight') {
+          keysRef.current.right = true;
+        }
+        if (code === 'ShiftLeft' || code === 'ShiftRight' || shiftHeld) {
+          keysRef.current.shift = true;
+        } else if (!isImeSynthetic && isMoveCode && !shiftHeld) {
+          keysRef.current.shift = false;
+        }
+      } else {
+        clearAllKeys();
       }
-      if (code === 'KeyS' || code === 'ArrowDown') {
-        keysRef.current.backward = true;
-      }
-      if (code === 'KeyA' || code === 'ArrowLeft') {
-        keysRef.current.left = true;
-      }
-      if (code === 'KeyD' || code === 'ArrowRight') {
-        keysRef.current.right = true;
-      }
-      if (code === 'ShiftLeft' || code === 'ShiftRight') keysRef.current.shift = true;
 
       if (!st.hasEnteredWorld) return;
 
       if (code === 'Space') {
+        // Never hijack Space when a <button> / [role="button"] has focus, when a modal is open, or when chat drawer is open!
+        if (isButtonFocused || st.activeModal !== 'none' || st.chatDrawerOpen) {
+          return;
+        }
         e.preventDefault();
+        if (shiftHeld) {
+          keysRef.current.shift = true;
+        }
         if (st.photoModeActive) {
           if (!st.latestCapturedPolaroid && st.photoCountdown === 0) {
             st.requestPhotoShutter();
           }
           return;
         }
-        if (st.activeModal === 'none') {
-          st.localTransient.jumpRequested = true;
-        }
+        st.localTransient.jumpRequested = true;
         return;
       }
 
@@ -297,7 +389,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         }
       }
 
-      // Escape exits Photo Mode or closes open Modal (and browser natively exits Pointer Lock)
+      // Escape exits Photo Mode, closes open Modal, yields to HUD submenus/chat drawer, or opens Settings in free-roam
       if (code === 'Escape') {
         if (st.photoModeActive) {
           st.setPhotoMode(false);
@@ -307,6 +399,18 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
           st.setActiveModal('none');
           return;
         }
+        if (document.body.dataset.hudSubmenuOpen === 'true' || st.chatDrawerOpen) {
+          return;
+        }
+        if (document.pointerLockElement !== gl.domElement) {
+          st.setActiveModal('settings');
+          return;
+        }
+      }
+
+      // Ignore all single-key shortcuts while Vietnamese Telex/VNI IME is composing (e.g. `oo -> ô`) or chat drawer is open!
+      if (isComposing || isNonAsciiChar || st.chatDrawerOpen) {
+        return;
       }
 
       // Context Interaction [E]
@@ -387,12 +491,44 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     };
 
     const onKeyUp = (e: KeyboardEvent) => {
-      if (!e.shiftKey) {
+      const now = performance.now();
+      const hwCode = e.code || '';
+      const rawKey = (e.key || '').toLowerCase();
+
+      // 1. Physical Shift release
+      if (hwCode === 'ShiftLeft' || hwCode === 'ShiftRight' || rawKey === 'shift') {
+        keysRef.current.shift = Boolean(e.shiftKey);
+        return;
+      }
+
+      // 2. Ignore synthetic EVKey / OpenKey / Unikey Backspace & CGEventKeyboardSetUnicodeString keyups:
+      // EVKey/OpenKey posts synthetic Backspace + virtualKey=0 ('KeyA') keydown+keyup bursts in <2ms with
+      // e.shiftKey === false, whereas genuine physical kCGEventKeyUp passes through untouched!
+      if (hwCode === 'Backspace' || rawKey === 'backspace') {
+        return;
+      }
+      if (hwCode === 'KeyA' && rawKey === 'a' && pendingSyntheticAKeyUp) {
+        pendingSyntheticAKeyUp = false;
+        return;
+      }
+      const isNonAsciiChar = rawKey.length === 1 && rawKey.charCodeAt(0) > 127;
+      const isCarbonVirtualZeroKeyUp =
+        hwCode === 'KeyA' && rawKey.length === 1 && rawKey !== 'a';
+      if (
+        isCarbonVirtualZeroKeyUp ||
+        (isNonAsciiChar && (hwCode === 'KeyA' || !hwCode || hwCode === 'Unidentified')) ||
+        ((e.isComposing || e.keyCode === 229 || e.which === 229) &&
+          (!hwCode || hwCode === 'Unidentified'))
+      ) {
+        return;
+      }
+
+      // Sync Shift state on genuine physical ASCII keyup without letting synthetic IME events clear Shift
+      if (!isNonAsciiChar && !e.isComposing && e.keyCode !== 229 && !e.shiftKey) {
         keysRef.current.shift = false;
       }
 
-      // 1. Always trust physical USB HID e.code first so releasing A/S/D never cancels a held W key under Telex!
-      const hwCode = e.code;
+      // 3. Always trust physical USB HID e.code first so releasing A/S/D never cancels a held W key under Telex!
       if (hwCode && hwCode !== 'Unidentified') {
         if (hwCode === 'KeyW' || hwCode === 'ArrowUp') {
           keysRef.current.forward = false;
@@ -410,19 +546,14 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
           keysRef.current.right = false;
           return;
         }
-        if (hwCode === 'ShiftLeft' || hwCode === 'ShiftRight') {
-          keysRef.current.shift = false;
-          return;
-        }
       }
 
-      // 2. Fallback only when hardware e.code is missing (e.g. legacy Windows IME VK_PACKET)
+      // 4. Fallback only when hardware e.code is missing (e.g. legacy Windows IME VK_PACKET)
       const code = resolveGameKeyCode(e);
       if (code === 'KeyW' || code === 'ArrowUp') keysRef.current.forward = false;
       if (code === 'KeyS' || code === 'ArrowDown') keysRef.current.backward = false;
       if (code === 'KeyA' || code === 'ArrowLeft') keysRef.current.left = false;
       if (code === 'KeyD' || code === 'ArrowRight') keysRef.current.right = false;
-      if (code === 'ShiftLeft' || code === 'ShiftRight') keysRef.current.shift = false;
     };
 
     const onWindowBlur = () => {
@@ -480,6 +611,19 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const isDressing = !st.hasEnteredWorld || st.activeModal === 'wardrobe';
       if (isDressing) return;
       if (st.activeModal !== 'none') return;
+      // Release any residual focus on HUD buttons when clicking back into the 3D world
+      const activeEl = document.activeElement as HTMLElement | null;
+      if (
+        activeEl &&
+        (activeEl.tagName === 'BUTTON' ||
+          activeEl.getAttribute('role') === 'button' ||
+          activeEl.closest?.('button, [role="button"]'))
+      ) {
+        activeEl.blur();
+      }
+      if (!st.chatDrawerOpen) {
+        keysRef.current.shift = Boolean(e.shiftKey);
+      }
       if (e.button === 0 || e.button === 1 || e.button === 2) {
         orbitStateRef.current.dragging = true;
         orbitStateRef.current.lastX = e.clientX;
@@ -507,6 +651,9 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         return;
       }
       if (st.activeModal !== 'none') return;
+      if (!st.chatDrawerOpen && e.shiftKey && !keysRef.current.shift) {
+        keysRef.current.shift = true;
+      }
 
       const isLocked = document.pointerLockElement === dom;
       if (!orbitStateRef.current.dragging && !isLocked) return;
@@ -520,7 +667,8 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const dx = THREE.MathUtils.clamp(rawDx, -180, 180);
       const dy = THREE.MathUtils.clamp(rawDy, -180, 180);
 
-      const sens = st.photoModeActive ? 0.0024 : isLocked ? 0.0029 : 0.0042;
+      const baseSens = st.photoModeActive ? 0.0024 : isLocked ? 0.0029 : 0.0042;
+      const sens = baseSens * st.cameraSensitivity;
       st.localTransient.cameraYaw -= dx * sens;
       const minPitch = st.photoModeActive ? -0.85 : -0.34;
       const maxPitch = st.photoModeActive ? 0.95 : 0.98;
@@ -529,6 +677,9 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         minPitch,
         maxPitch
       );
+      if (Math.hypot(dx, dy) > 3) {
+        st.advanceOnboarding('look');
+      }
     };
 
     const onPointerUp = () => {
@@ -612,14 +763,17 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       // Two-finger horizontal trackpad pan rotates camera yaw smoothly in third-person mode
       if (!e.ctrlKey && Math.abs(e.deltaX) > Math.abs(e.deltaY) * 1.1 && Math.abs(e.deltaX) > 0.4) {
         e.preventDefault();
-        st.localTransient.cameraYaw -= e.deltaX * 0.0042;
+        st.localTransient.cameraYaw -= e.deltaX * 0.0042 * st.cameraSensitivity;
+        st.advanceOnboarding('look');
         return;
       }
-      orbitStateRef.current.targetDistance = THREE.MathUtils.clamp(
-        orbitStateRef.current.targetDistance + e.deltaY * 0.0045,
+      const nextCamDist = THREE.MathUtils.clamp(
+        st.localTransient.targetCameraDistance + e.deltaY * 0.0045,
         1.35,
         8.6
       );
+      st.localTransient.targetCameraDistance = nextCamDist;
+      orbitStateRef.current.targetDistance = nextCamDist;
     };
 
     const onContextMenu = (e: MouseEvent) => {
@@ -721,13 +875,18 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       lt.y = Math.max(baseFloorY, 135.31);
 
       // Frame character on the open right stage with East Volumetric Cloud Sea & Sunrise behind + live pan/zoom!
-      const isWideDesktop = typeof window !== 'undefined' ? window.innerWidth >= 820 : true;
+      const isWideDesktop =
+        typeof window !== 'undefined'
+          ? (window.innerWidth >= 860 && window.innerHeight >= 540) ||
+            (window.innerHeight < 520 && window.innerWidth > window.innerHeight)
+          : true;
       const zoom = lt.previewCurrentZoom;
       const zoomPortraitLift = Math.max(0, 1.0 - zoom) * 0.36;
       const panY = lt.previewCurrentPanY;
+      const breathAmp = st.reducedMotion ? 0 : 0.04 * zoom;
 
-      const camX = lt.x - 2.66 * zoom + Math.sin(elapsed * 0.24) * 0.04 * zoom;
-      const camZ = lt.z - 0.88 * zoom + Math.cos(elapsed * 0.19) * 0.04 * zoom;
+      const camX = lt.x - 2.66 * zoom + Math.sin(elapsed * 0.24) * breathAmp;
+      const camZ = lt.z - 0.88 * zoom + Math.cos(elapsed * 0.19) * breathAmp;
       const camY = lt.y + (isWideDesktop ? 1.14 : 1.24) + zoomPortraitLift + panY * 0.82;
       camera.position.set(camX, camY, camZ);
 
@@ -769,26 +928,99 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       }
     }
 
-    // 4. Input Vector (Keyboard + Mobile Virtual Joystick)
+    // 4. Input Vector (Keyboard + Mobile Virtual Joystick + Standard Web Gamepad API)
     const keys = keysRef.current;
     const modalBlocking = st.activeModal !== 'none';
-    if (modalBlocking || isTypingInInput()) {
+    const movementBlocked =
+      modalBlocking || st.chatDrawerOpen || !st.hasEnteredWorld || isTypingInInput();
+    if (movementBlocked) {
       keys.forward = false;
       keys.backward = false;
       keys.left = false;
       keys.right = false;
       keys.shift = false;
     }
-    if (modalBlocking && document.pointerLockElement === gl.domElement) {
+    if ((modalBlocking || st.chatDrawerOpen) && document.pointerLockElement === gl.domElement) {
       document.exitPointerLock?.();
     }
-    const rawInX = modalBlocking
-      ? 0
-      : THREE.MathUtils.clamp((keys.right ? 1 : 0) - (keys.left ? 1 : 0) + lt.moveInputX, -1, 1);
-    const rawInZ = modalBlocking
-      ? 0
-      : THREE.MathUtils.clamp((keys.backward ? 1 : 0) - (keys.forward ? 1 : 0) + lt.moveInputZ, -1, 1);
-    const inputMag = Math.min(1, Math.hypot(rawInX, rawInZ));
+
+    let gpMoveX = 0;
+    let gpMoveZ = 0;
+    let gpSprint = false;
+    const pads = typeof navigator !== 'undefined' && navigator.getGamepads ? navigator.getGamepads() : null;
+    const pad = pads ? pads[0] || pads[1] || pads[2] || pads[3] : null;
+    if (pad && pad.connected) {
+      const deadzone = (v: number) => (Math.abs(v) < 0.16 ? 0 : (v - Math.sign(v) * 0.16) / 0.84);
+      gpMoveX = deadzone(pad.axes[0] || 0);
+      gpMoveZ = deadzone(pad.axes[1] || 0);
+      const rx = deadzone(pad.axes[2] || 0);
+      const ry = deadzone(pad.axes[3] || 0);
+      if (!modalBlocking && (rx !== 0 || ry !== 0)) {
+        const gpLookRate = (st.photoModeActive ? 1.5 : 2.35) * st.cameraSensitivity;
+        lt.cameraYaw -= rx * gpLookRate * dt;
+        const minP = st.photoModeActive ? -0.85 : -0.34;
+        const maxP = st.photoModeActive ? 0.95 : 0.98;
+        lt.cameraPitch = THREE.MathUtils.clamp(lt.cameraPitch + ry * gpLookRate * 0.72 * dt, minP, maxP);
+        st.advanceOnboarding('look');
+      }
+      gpSprint = Boolean(pad.buttons[10]?.pressed || (pad.buttons[6]?.value ?? 0) > 0.4 || (pad.buttons[7]?.value ?? 0) > 0.4);
+
+      if (!modalBlocking && !st.photoModeActive) {
+        if (pad.buttons[12]?.pressed) {
+          lt.targetCameraDistance = THREE.MathUtils.clamp(lt.targetCameraDistance - 2.6 * dt, 1.35, 8.6);
+        }
+        if (pad.buttons[13]?.pressed) {
+          lt.targetCameraDistance = THREE.MathUtils.clamp(lt.targetCameraDistance + 2.6 * dt, 1.35, 8.6);
+        }
+      }
+
+      const b0 = Boolean(pad.buttons[0]?.pressed); // A / Cross
+      const b1 = Boolean(pad.buttons[1]?.pressed); // B / Circle
+      const b2 = Boolean(pad.buttons[2]?.pressed); // X / Square
+      const b3 = Boolean(pad.buttons[3]?.pressed); // Y / Triangle
+      const prev = tState.gpBtnPrev;
+
+      if (b0 && !prev[0]) {
+        if (st.photoModeActive) {
+          if (!st.latestCapturedPolaroid && st.photoCountdown === 0) st.requestPhotoShutter();
+        } else if (!modalBlocking && st.nearbyPrompt) {
+          executeInteractPrompt(st.nearbyPrompt, net);
+        } else if (!modalBlocking) {
+          lt.jumpRequested = true;
+        }
+      }
+      if (b1 && !prev[1]) {
+        if (st.photoModeActive) st.setPhotoMode(false);
+        else if (modalBlocking) st.setActiveModal('none');
+        else lt.jumpRequested = true;
+      }
+      if (b2 && !prev[2] && !modalBlocking && !st.photoModeActive && st.nearbyPeer) {
+        executePeerSocialAction('greet', st.nearbyPeer, net);
+      }
+      if (b3 && !prev[3] && !modalBlocking) {
+        const nextPhoto = !st.photoModeActive;
+        if (nextPhoto && st.heldItem !== 'film_camera') {
+          st.setHeldItem('film_camera');
+          net.sendHeldItem('film_camera');
+        }
+        st.setPhotoMode(nextPhoto);
+      }
+      tState.gpBtnPrev = [b0, b1, b2, b3];
+    }
+
+    // Normalize keyboard (fwd, right) when Math.hypot(fwd, right) > 1 so diagonal W+D === straight W (ratio = 1.00)!
+    let kbRight = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+    let kbFwd = (keys.backward ? 1 : 0) - (keys.forward ? 1 : 0);
+    const kbHypot = Math.hypot(kbRight, kbFwd);
+    if (kbHypot > 1) {
+      kbRight /= kbHypot;
+      kbFwd /= kbHypot;
+    }
+
+    const rawInX = movementBlocked ? 0 : kbRight + lt.moveInputX + gpMoveX;
+    const rawInZ = movementBlocked ? 0 : kbFwd + lt.moveInputZ + gpMoveZ;
+    const rawLen = Math.hypot(rawInX, rawInZ);
+    const inputMag = Math.min(1, rawLen);
 
     // In Photo Mode, WASD gently pans the viewfinder within a cozy 3.2m tripod leash around the player
     if (st.photoModeActive) {
@@ -796,28 +1028,29 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       lt.running = false;
       lt.vx = 0;
       lt.vz = 0;
-      if (inputMag > 0.02 && !st.latestCapturedPolaroid) {
+      if (inputMag > 0.02 && rawLen > 0.001 && !st.latestCapturedPolaroid) {
         const forwardX = -Math.sin(lt.cameraYaw);
         const forwardZ = -Math.cos(lt.cameraYaw);
         const rightX = Math.cos(lt.cameraYaw);
         const rightZ = -Math.sin(lt.cameraYaw);
-        const nx = rawInX / inputMag;
-        const nz = rawInZ / inputMag;
+        const nx = rawInX / rawLen;
+        const nz = rawInZ / rawLen;
         const moveWorldX = rightX * nx + forwardX * -nz;
         const moveWorldZ = rightZ * nx + forwardZ * -nz;
-        _photoOffset.x += moveWorldX * 3.2 * dt;
-        _photoOffset.z += moveWorldZ * 3.2 * dt;
+        _photoOffset.x += moveWorldX * 3.2 * inputMag * dt;
+        _photoOffset.z += moveWorldZ * 3.2 * inputMag * dt;
         if (_photoOffset.length() > 3.2) {
           _photoOffset.setLength(3.2);
         }
       }
     } else {
-      // Auto-stand up from bench if player moves or jumps (step slightly forward clear of bench box)
+      // Auto-stand up from bench if player moves or jumps (bench-cafe-1/2 steps inward to x - 0.72 onto clear planks!)
       if (st.seatedBenchId && (inputMag > 0.15 || lt.jumpRequested)) {
-        const seatTransform = resolveBenchSeatTransform(st.seatedBenchId);
-        if (seatTransform) {
-          lt.x = seatTransform.position[0] + Math.sin(seatTransform.yaw) * 0.78;
-          lt.z = seatTransform.position[2] + Math.cos(seatTransform.yaw) * 0.78;
+        const standPos = computeBenchStandUpPosition(st.seatedBenchId);
+        if (standPos) {
+          lt.x = standPos[0];
+          lt.y = standPos[1];
+          lt.z = standPos[2];
         }
         st.setSeatedBench(null);
         net.requestBenchSeat(null);
@@ -831,6 +1064,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         lt.running = false;
         lt.grounded = true;
         lt.jumpRequested = false;
+        wasAirborneRef.current = false;
         tState.coyoteTimerSec = COYOTE_TIME_SEC;
         tState.jumpBufferSec = 0;
       } else {
@@ -841,18 +1075,24 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         const rightX = Math.cos(lt.cameraYaw);
         const rightZ = -Math.sin(lt.cameraYaw);
 
-        const nx = inputMag > 0.001 ? rawInX / inputMag : 0;
-        const nz = inputMag > 0.001 ? rawInZ / inputMag : 0;
+        const nx = rawLen > 0.001 ? rawInX / rawLen : 0;
+        const nz = rawLen > 0.001 ? rawInZ / rawLen : 0;
         const wishDirX = rightX * nx + forwardX * -nz;
         const wishDirZ = rightZ * nx + forwardZ * -nz;
 
         const wantsRun =
           keys.shift ||
-          (inputMag > 0.88 && (Math.abs(lt.moveInputX) > 0.05 || Math.abs(lt.moveInputZ) > 0.05));
-        const warmBoost = st.warmthRemainingSec > 0 ? 1.12 : 1.0; // +12% Highland Warmth cozy boost!
+          gpSprint ||
+          (inputMag > 0.88 &&
+            (Math.abs(lt.moveInputX) > 0.05 ||
+              Math.abs(lt.moveInputZ) > 0.05 ||
+              Math.abs(gpMoveX) > 0.05 ||
+              Math.abs(gpMoveZ) > 0.05));
+        const warmRunBoost = st.warmthRemainingSec > 0 ? 1.12 : 1.0; // +12% Highland Warmth sprint boost!
+        const warmWalkBoost = st.warmthRemainingSec > 0 ? 1.05 : 1.0;
         const maxSpeed = wantsRun
-          ? WORLD_CONSTANTS.MAX_RUN_SPEED * warmBoost
-          : WORLD_CONSTANTS.MAX_WALK_SPEED;
+          ? WORLD_CONSTANTS.MAX_RUN_SPEED * warmRunBoost
+          : WORLD_CONSTANTS.MAX_WALK_SPEED * warmWalkBoost;
 
         const targetVx = wishDirX * maxSpeed * inputMag;
         const targetVz = wishDirZ * maxSpeed * inputMag;
@@ -886,12 +1126,13 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
 
         const horizSpeed = Math.hypot(lt.vx, lt.vz);
         lt.moving = inputMag > 0.06 && horizSpeed > 0.16;
-        lt.running = lt.moving && wantsRun && horizSpeed > 4.4;
+        lt.running = lt.moving && wantsRun && horizSpeed > 2.85;
 
         if (lt.moving) {
           const desiredYaw = Math.atan2(wishDirX, wishDirZ);
           const turnLambda = lt.running ? 18.0 : 16.0;
           lt.yaw += shortestAngleDiff(lt.yaw, desiredYaw) * (1 - Math.exp(-turnLambda * dt));
+          st.advanceOnboarding('move');
         }
 
         // Coyote Time + Jump Input Buffer + Downhill Slope Grounding
@@ -913,6 +1154,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         if (tState.jumpBufferSec > 0 && tState.coyoteTimerSec > 0) {
           lt.vy = JUMP_VELOCITY;
           lt.grounded = false;
+          wasAirborneRef.current = true;
           tState.jumpBufferSec = 0;
           tState.coyoteTimerSec = 0;
           justJumped = true;
@@ -921,6 +1163,9 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         if (!wasGrounded || justJumped) {
           if (!justJumped) {
             lt.vy += GRAVITY * dt;
+            if (lt.vy < -1.4) {
+              wasAirborneRef.current = true;
+            }
           }
         } else {
           lt.vy = 0;
@@ -929,30 +1174,74 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         // Advance horizontal position within 900m x 900m safe ridge boundary
         // (sub-stepped when stepDist > 0.12m so fast sprints never tunnel through thin railings/trunks)
         const bound = WORLD_CONSTANTS.HALF_SIZE - 14;
-        const totalDx = lt.vx * dt;
-        const totalDz = lt.vz * dt;
-        const stepDist = Math.hypot(totalDx, totalDz);
-        const horizSubSteps = stepDist > 0.12 ? Math.min(3, Math.ceil(stepDist / 0.12)) : 1;
+        const initialStepDist = Math.hypot(lt.vx * dt, lt.vz * dt);
+        const horizSubSteps =
+          initialStepDist > 0.12 ? Math.min(3, Math.ceil(initialStepDist / 0.12)) : 1;
         lt.y += lt.vy * dt;
 
+        // Helper: block uphill velocity only on true >62.8° outer abyssal cliffs (macro slopeTan > 1.95),
+        // never on open grassy hillsides, trail embankments, or Cầu Đất tea terraces!
+        const applySteepCliffLimit = (prevX: number, prevZ: number, nextX: number, nextZ: number) => {
+          const surfNext = getSurfaceType(nextX, nextZ);
+          const walkNext = sampleWalkableHeight(nextX, nextZ);
+          const groundNext = sampleGroundHeight(nextX, nextZ);
+          const onWoodenDeck =
+            surfNext === 'wood_deck' ||
+            (walkNext > groundNext + 0.15 && lt.y >= walkNext - 1.45);
+          if (onWoodenDeck || distanceToTrail(nextX, nextZ) <= 9.0) {
+            return { x: nextX, z: nextZ };
+          }
+          const grad = sampleGroundGradient(nextX, nextZ, 2.2);
+          if (grad.slopeTan > 1.95) {
+            const upDot = lt.vx * grad.dhdx + lt.vz * grad.dhdz;
+            if (upDot > 0) {
+              const gradSq = grad.dhdx * grad.dhdx + grad.dhdz * grad.dhdz;
+              if (gradSq > 1e-6) {
+                lt.vx -= (upDot / gradSq) * grad.dhdx;
+                lt.vz -= (upDot / gradSq) * grad.dhdz;
+              }
+              const subDt = dt / horizSubSteps;
+              let slideX = THREE.MathUtils.clamp(prevX + lt.vx * subDt, -bound, bound);
+              let slideZ = THREE.MathUtils.clamp(prevZ + lt.vz * subDt, -bound, bound);
+              const prevG = sampleGroundHeight(prevX, prevZ);
+              const slideG = sampleGroundHeight(slideX, slideZ);
+              if (slideG > prevG && gradSq > 1e-6) {
+                const excessH = slideG - prevG;
+                slideX -= (excessH / gradSq) * grad.dhdx;
+                slideZ -= (excessH / gradSq) * grad.dhdz;
+              }
+              return { x: slideX, z: slideZ };
+            }
+          }
+          return { x: nextX, z: nextZ };
+        };
+
         // 5. Watertight 2-Pass BVH Capsule Obstacle Pushout + Downward Raycast + Anti-Tunneling Floor Guard
-        const collider = worldColliderRegistry.getCollider();
+        // Separate horizontal obstacle BVH (walls/railings/cabins/props/trunks ONLY) from floor BVH (terrain + decks)
+        // so grassy terrain slopes NEVER act as invisible horizontal walls!
+        const obsCollider = worldColliderRegistry.getObstacleCollider();
+        const floorCollider = worldColliderRegistry.getCollider();
         let bvhFloorY: number | null = null;
 
-        if (collider) {
-          const { mesh, bvh } = collider;
-          mesh.updateMatrixWorld();
-          _invMat.copy(mesh.matrixWorld).invert();
-          _normalMat.getNormalMatrix(mesh.matrixWorld);
+        if (obsCollider) {
+          const { mesh: obsMesh, bvh: obsBvh } = obsCollider;
+          obsMesh.updateMatrixWorld();
+          _invMat.copy(obsMesh.matrixWorld).invert();
+          _normalMat.getNormalMatrix(obsMesh.matrixWorld);
 
           for (let sub = 0; sub < horizSubSteps; sub++) {
             const prevX = lt.x;
             const prevZ = lt.z;
-            lt.x = THREE.MathUtils.clamp(lt.x + totalDx / horizSubSteps, -bound, bound);
-            lt.z = THREE.MathUtils.clamp(lt.z + totalDz / horizSubSteps, -bound, bound);
+            const subDt = dt / horizSubSteps;
+            const candX = THREE.MathUtils.clamp(prevX + lt.vx * subDt, -bound, bound);
+            const candZ = THREE.MathUtils.clamp(prevZ + lt.vz * subDt, -bound, bound);
+            const cliffClamped = applySteepCliffLimit(prevX, prevZ, candX, candZ);
+            lt.x = cliffClamped.x;
+            lt.z = cliffClamped.z;
 
-            // 5a. Two-iteration horizontal wall/railing/cabin/tree/prop capsule shapecast (starts 0.34m above feet)
-            _capsuleSeg.start.set(lt.x, lt.y + 0.34, lt.z).applyMatrix4(_invMat);
+            // 5a. Two-iteration horizontal wall/railing/cabin/tree/prop capsule shapecast
+            // With CAPSULE_RADIUS=0.38, start.y = lt.y + 0.66 places bottom sphere at lt.y + 0.28m (true 28cm step clearance!)
+            _capsuleSeg.start.set(lt.x, lt.y + 0.66, lt.z).applyMatrix4(_invMat);
             _capsuleSeg.end.set(lt.x, lt.y + 1.56, lt.z).applyMatrix4(_invMat);
 
             for (let iter = 0; iter < 2; iter++) {
@@ -963,7 +1252,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
               _capsuleBox.max.addScalar(CAPSULE_RADIUS + 0.06);
 
               let anyPush = false;
-              bvh.shapecast({
+              obsBvh.shapecast({
                 intersectsBounds: (box) => box.intersectsBox(_capsuleBox),
                 intersectsTriangle: (tri) => {
                   const dist = tri.closestPointToSegment(_capsuleSeg, _triPt, _capPt);
@@ -1007,7 +1296,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
             }
 
             // Transform resolved capsule XZ back to world space and damp velocity into blocked axis
-            _hitWorld.copy(_capsuleSeg.start).applyMatrix4(mesh.matrixWorld);
+            _hitWorld.copy(_capsuleSeg.start).applyMatrix4(obsMesh.matrixWorld);
             const corrDx = _hitWorld.x - lt.x;
             const corrDz = _hitWorld.z - lt.z;
             if (corrDx * corrDx + corrDz * corrDz > 1e-6) {
@@ -1023,8 +1312,25 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
             lt.x = _hitWorld.x;
             lt.z = _hitWorld.z;
           }
+        } else {
+          for (let sub = 0; sub < horizSubSteps; sub++) {
+            const prevX = lt.x;
+            const prevZ = lt.z;
+            const subDt = dt / horizSubSteps;
+            const candX = THREE.MathUtils.clamp(prevX + lt.vx * subDt, -bound, bound);
+            const candZ = THREE.MathUtils.clamp(prevZ + lt.vz * subDt, -bound, bound);
+            const cliffClamped = applySteepCliffLimit(prevX, prevZ, candX, candZ);
+            lt.x = cliffClamped.x;
+            lt.z = cliffClamped.z;
+          }
+        }
 
-          // 5b. Multi-point foot-base downward raycast from chest height (prevents upslope toe/heel ground clipping!)
+        // 5b. Multi-point foot-base downward raycast from chest height against full floor BVH (terrain + decks)
+        if (floorCollider) {
+          const { mesh, bvh } = floorCollider;
+          mesh.updateMatrixWorld();
+          _invMat.copy(mesh.matrixWorld).invert();
+          _normalMat.getNormalMatrix(mesh.matrixWorld);
           _ray.direction.copy(_downDir).transformDirection(_invMat).normalize();
           const fwdX = Math.sin(lt.yaw);
           const fwdZ = Math.cos(lt.yaw);
@@ -1058,11 +1364,14 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
           }
         }
 
-        // 5c. Personal-space soft separation against remote human peers so players never stack at 0.0m
+        // 5c. Personal-space soft separation against visible nearby peers ONLY (never hidden/stale/seated peers!)
         const peers = st.peers;
         for (const peerId in peers) {
           const peer = peers[peerId];
           if (!peer) continue;
+          if (peer.inNearAoi === false) continue;
+          if (peer.lastNearSnapMs !== undefined && nowMs - peer.lastNearSnapMs > 1500) continue;
+          if (peer.seatId) continue;
           if (Math.abs(peer.y - lt.y) > 1.8) continue;
           const pdx = lt.x - peer.x;
           const pdz = lt.z - peer.z;
@@ -1102,6 +1411,34 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         } else {
           lt.grounded = false;
         }
+
+        // Trigger a soft tactile footstep/landing sound when landing from a jump or drop
+        if (wasAirborneRef.current && lt.grounded) {
+          wasAirborneRef.current = false;
+          tState.strideDistAccum = 0.15;
+          playLandingFootstep(getSurfaceType(lt.x, lt.z));
+        }
+
+        // Rhythmic surface-matched walking & running footsteps synced to biomechanical step length
+        if (lt.grounded && lt.moving && !st.seatedBenchId) {
+          const horizSpeed = Math.hypot(lt.vx, lt.vz);
+          const stepLen = lt.running ? 1.42 : 0.91;
+          tState.strideDistAccum += horizSpeed * dt;
+          tState.stridePhaseRad =
+            (tState.stridePhaseRad + (horizSpeed / stepLen) * Math.PI * dt) % (Math.PI * 2);
+          if (tState.strideDistAccum >= stepLen) {
+            tState.strideDistAccum %= stepLen;
+            tState.strideLeftFoot = !tState.strideLeftFoot;
+            playStrideFootstep(
+              getSurfaceType(lt.x, lt.z),
+              lt.running,
+              tState.strideLeftFoot,
+              st.atmosphere.drizzleIntensity
+            );
+          }
+        } else {
+          tState.strideDistAccum = 0.52;
+        }
       }
     }
 
@@ -1113,7 +1450,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const eyeY = Math.max(lt.y + 1.56, Math.min(lt.y + 2.2, floorAtCam + 1.15));
 
       // Prevent Photo Mode tripod camera from pushing inside cabin walls or railings
-      const collider = worldColliderRegistry.getCollider();
+      const collider = worldColliderRegistry.getObstacleCollider();
       if (collider) {
         const { mesh, bvh } = collider;
         mesh.updateMatrixWorld();
@@ -1162,12 +1499,17 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
 
       camera.position.set(eyeX, eyeY, eyeZ);
       camera.lookAt(eyeX + lookDirX * 20, eyeY + lookDirY * 20, eyeZ + lookDirZ * 20);
+      lt.cameraOccludesSelf = false;
 
       const targetFov = FOCAL_TO_FOV[st.photoFocalMm] || 54;
       oState.currentFov += (targetFov - oState.currentFov) * (1 - Math.exp(-14 * dt));
     } else if (st.activeModal === 'wardrobe') {
       // Smooth Full-Body Live Wardrobe Portrait Camera (frames character on uncovered right 3D stage + live pan/zoom!)
-      const isWideDesktop = typeof window !== 'undefined' ? window.innerWidth >= 820 : true;
+      const isWideDesktop =
+        typeof window !== 'undefined'
+          ? (window.innerWidth >= 860 && window.innerHeight >= 540) ||
+            (window.innerHeight < 520 && window.innerWidth > window.innerHeight)
+          : true;
       const targetFov = 44;
       oState.currentFov += (targetFov - oState.currentFov) * (1 - Math.exp(-10 * dt));
 
@@ -1217,6 +1559,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const lookY = lt.y + (isWideDesktop ? 0.96 : 0.64) + zoomPortraitLift + panY;
       _camLookAt.set(lt.x + fz * rightShift, lookY, lt.z - fx * rightShift);
       camera.lookAt(_camLookAt);
+      lt.cameraOccludesSelf = false;
     } else {
       // Detect iconic Da Lat cloud-hunting viewpoints for wide horizon framing (52° -> 58°)
       const nearPierTip = Math.hypot(lt.x - 91, lt.z - -75) < 13.5;
@@ -1226,18 +1569,25 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const isScenicOverlook =
         nearPierTip || nearValleyOverlook || nearLonelyPine || nearPinkHollow;
 
-      const sprintFovBoost = lt.running ? 2.5 : 0;
-      const targetFov = (isScenicOverlook ? 58 : 52) + sprintFovBoost;
+      const sprintFovBoost = !st.reducedMotion && lt.running ? 2.5 : 0;
+      const targetFov = (isScenicOverlook && !st.reducedMotion ? 58 : 52) + sprintFovBoost;
       oState.currentFov += (targetFov - oState.currentFov) * (1 - Math.exp(-5.0 * dt));
 
+      oState.targetDistance = lt.targetCameraDistance;
       const scenicDistBoost = isScenicOverlook ? 0.65 : 0;
       oState.distance +=
         (oState.targetDistance + scenicDistBoost - oState.distance) * (1 - Math.exp(-11 * dt));
 
-      const pivotLift = (st.seatedBenchId ? 1.24 : 1.48) + (isScenicOverlook ? 0.34 : 0);
+      const strideCamBob =
+        !st.reducedMotion && lt.grounded && lt.moving && !st.seatedBenchId
+          ? Math.sin(tState.stridePhaseRad * 2) * (lt.running ? 0.011 : 0.0055)
+          : 0;
+      const pivotLift =
+        (st.seatedBenchId ? 1.24 : 1.48) + (isScenicOverlook ? 0.34 : 0) + strideCamBob;
       _camPivot.set(lt.x, lt.y + pivotLift, lt.z);
 
-      if (!oState.initialized) {
+      const wasUninitialized = !oState.initialized;
+      if (wasUninitialized) {
         oState.smoothPivot.copy(_camPivot);
         oState.smoothFloorLift = 0;
         oState.initialized = true;
@@ -1249,24 +1599,82 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         oState.smoothPivot.y += (_camPivot.y - oState.smoothPivot.y) * yBlend;
       }
 
-      // Compute exact spherical orbit directly from smoothPivot (zero mouse-look lag or chord-cutting!)
+      // Compute spherical orbit direction from smoothPivot
       const cosPitch = Math.cos(lt.cameraPitch);
-      const offsetX = Math.sin(lt.cameraYaw) * cosPitch * oState.distance;
-      const offsetY = Math.sin(lt.cameraPitch) * oState.distance;
-      const offsetZ = Math.cos(lt.cameraYaw) * cosPitch * oState.distance;
+      const dirX = Math.sin(lt.cameraYaw) * cosPitch;
+      const dirY = Math.sin(lt.cameraPitch);
+      const dirZ = Math.cos(lt.cameraYaw) * cosPitch;
+      const desiredDist = oState.distance;
 
+      // Ideal unobstructed camera position
       _camDesired.set(
-        oState.smoothPivot.x + offsetX,
-        oState.smoothPivot.y + offsetY,
-        oState.smoothPivot.z + offsetZ
+        oState.smoothPivot.x + dirX * desiredDist,
+        oState.smoothPivot.y + dirY * desiredDist,
+        oState.smoothPivot.z + dirZ * desiredDist
       );
 
-      // Smoothly lift camera above sloped terrain or wooden decks
-      const minCamY = sampleWalkableHeight(_camDesired.x, _camDesired.z) + 0.62;
-      const neededLift = Math.max(0, minCamY - _camDesired.y);
-      oState.smoothFloorLift +=
-        (neededLift - oState.smoothFloorLift) * (1 - Math.exp(-20 * dt));
-      _camDesired.y += oState.smoothFloorLift;
+      // Wall/Cabin Spring-Arm BVH Raycast from (lt.x, lt.y + 1.42, lt.z) toward _camDesired
+      let targetCamDist = desiredDist;
+      const camCollider = worldColliderRegistry.getCollider();
+      if (camCollider) {
+        const { mesh, bvh } = camCollider;
+        mesh.updateMatrixWorld();
+        _invMat.copy(mesh.matrixWorld).invert();
+        _camRayOrigin.set(lt.x, lt.y + 1.42, lt.z);
+        _camRayDir.subVectors(_camDesired, _camRayOrigin);
+        const segLen = _camRayDir.length();
+        if (segLen > 0.34) {
+          _camRayDir.divideScalar(segLen);
+          _ray.origin.copy(_camRayOrigin).applyMatrix4(_invMat);
+          _ray.direction.copy(_camRayDir).transformDirection(_invMat).normalize();
+          const hit = bvh.raycastFirst(_ray, THREE.DoubleSide, 0.32, segLen + 0.15);
+          if (hit) {
+            _hitWorld.copy(hit.point).applyMatrix4(mesh.matrixWorld);
+            const hitDist = _hitWorld.distanceTo(_camRayOrigin);
+            if (hitDist > 0.32 && hitDist < desiredDist + 0.15) {
+              // Pull in to Math.max(0.82, hitDist - 0.28), capped to hitDist - 0.14 when backed tight (<1.1m) against a cabin wall!
+              targetCamDist = Math.max(
+                0.26,
+                Math.min(hitDist - 0.14, Math.max(0.82, hitDist - 0.28))
+              );
+            }
+          }
+        }
+      }
+
+      if (wasUninitialized) {
+        camActualDistRef.current = targetCamDist;
+      } else if (targetCamDist < camActualDistRef.current) {
+        // Fast pull-in (dt * 24) so walls never occlude the avatar
+        camActualDistRef.current +=
+          (targetCamDist - camActualDistRef.current) * Math.min(1, dt * 24);
+      } else {
+        // Smooth ease-out (dt * 7) so spring arm never pumps or jitters
+        camActualDistRef.current +=
+          (targetCamDist - camActualDistRef.current) * Math.min(1, dt * 7);
+      }
+
+      const actualDist = camActualDistRef.current;
+      _camDesired.set(
+        oState.smoothPivot.x + dirX * actualDist,
+        oState.smoothPivot.y + dirY * actualDist,
+        oState.smoothPivot.z + dirZ * actualDist
+      );
+
+      // Under-Deck +7..13m Snap Fix: check both walkable deck height and natural ground height!
+      const walkH = sampleWalkableHeight(_camDesired.x, _camDesired.z);
+      const groundH = sampleGroundHeight(_camDesired.x, _camDesired.z);
+      if (lt.y < walkH - 1.5) {
+        // Player is underneath an elevated stilted deck — never snap camera up onto walkH!
+        oState.smoothFloorLift = 0;
+        _camDesired.y = Math.min(walkH - 0.45, Math.max(groundH + 0.52, _camDesired.y));
+      } else {
+        const minCamY = walkH + 0.62;
+        const neededLift = Math.max(0, minCamY - _camDesired.y);
+        oState.smoothFloorLift +=
+          (neededLift - oState.smoothFloorLift) * (1 - Math.exp(-20 * dt));
+        _camDesired.y += oState.smoothFloorLift;
+      }
 
       _camLookAt.set(
         oState.smoothPivot.x - Math.sin(lt.cameraYaw) * 1.15,
@@ -1276,7 +1684,12 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
 
       camera.position.copy(_camDesired);
       camera.lookAt(_camLookAt);
+      lt.cameraOccludesSelf = actualDist < 0.88;
     }
+
+    lt.camX = camera.position.x;
+    lt.camY = camera.position.y;
+    lt.camZ = camera.position.z;
 
     if (
       camera instanceof THREE.PerspectiveCamera &&
@@ -1304,7 +1717,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         }
       }
 
-      const nextPrompt = st.photoModeActive ? null : evaluateNearbyPrompt(lt.x, lt.z);
+      const nextPrompt = st.photoModeActive ? null : evaluateNearbyPrompt(lt.x, lt.z, lt.y);
       const nextId = nextPrompt ? nextPrompt.id : '';
       if (nextId !== tState.lastPromptId) {
         tState.lastPromptId = nextId;

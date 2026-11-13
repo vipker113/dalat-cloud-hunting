@@ -17,22 +17,26 @@ import {
   type HeadwearId,
   type HeldItemId,
   type NeckwearId,
+  normalizeRoomCode,
   type PlayerOutfit,
   type PolaroidEntry,
+  type PolaroidPinAck,
   resolveBenchSeatTransform,
   resolveEffectiveGender,
+  ROOM_CODE_REGEX,
   sampleWalkableHeight,
-  SHARED_BENCHES,
+  type ServerPoseCorrection,
   type SocialInteractKind,
   type WindChimeNote,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
+import { computeBenchStandUpPosition } from '../gameplay/interactions';
 import {
   type RemotePeerState,
   type RoomChannelInfo,
   useGameStore,
 } from '../store/gameStore';
-import type { IMultiplayerController } from './types';
+import type { IMultiplayerController, SwitchChannelResult } from './types';
 
 const ROOM_NAME = 'cloud_hunting';
 const RING_BUFFER_CAPACITY = 4;
@@ -80,6 +84,7 @@ interface ReflectedRoomState {
 
 interface SnapshotSample {
   recvMs: number;
+  serverTick: number;
   x: number;
   y: number;
   z: number;
@@ -100,6 +105,7 @@ class PeerSnapshotRingBuffer {
   constructor() {
     this.slots = Array.from({ length: RING_BUFFER_CAPACITY }, () => ({
       recvMs: 0,
+      serverTick: 0,
       x: 0,
       y: 0,
       z: 0,
@@ -115,6 +121,7 @@ class PeerSnapshotRingBuffer {
 
   public push(
     recvMs: number,
+    serverTick: number,
     x: number,
     y: number,
     z: number,
@@ -126,28 +133,35 @@ class PeerSnapshotRingBuffer {
     grounded: boolean,
     warmBuff: boolean
   ): void {
-    // Coalesce burst frames arriving within < 4ms of each other
     if (this.count > 0) {
       const newestIdx = (this.head - 1 + RING_BUFFER_CAPACITY) % RING_BUFFER_CAPACITY;
-      if (recvMs - this.slots[newestIdx].recvMs < 4) {
-        const s = this.slots[newestIdx];
-        s.recvMs = recvMs;
-        s.x = x;
-        s.y = y;
-        s.z = z;
-        s.yaw = yaw;
-        s.vx = vx;
-        s.vz = vz;
-        s.moving = moving;
-        s.running = running;
-        s.grounded = grounded;
-        s.warmBuff = warmBuff;
+      const newest = this.slots[newestIdx];
+      // uint16 serverTick wraparound guard: ignore stale out-of-order snapshots
+      const tickDelta = (serverTick - newest.serverTick + 65536) % 65536;
+      if (tickDelta > 32768) {
+        return;
+      }
+      // Coalesce burst frames arriving within < 4ms or duplicate serverTick
+      if (recvMs - newest.recvMs < 4 || tickDelta === 0) {
+        newest.recvMs = recvMs;
+        newest.serverTick = serverTick;
+        newest.x = x;
+        newest.y = y;
+        newest.z = z;
+        newest.yaw = yaw;
+        newest.vx = vx;
+        newest.vz = vz;
+        newest.moving = moving;
+        newest.running = running;
+        newest.grounded = grounded;
+        newest.warmBuff = warmBuff;
         return;
       }
     }
 
     const slot = this.slots[this.head];
     slot.recvMs = recvMs;
+    slot.serverTick = serverTick;
     slot.x = x;
     slot.y = y;
     slot.z = z;
@@ -241,6 +255,92 @@ function readUrlRoomCode(): string | undefined {
   }
 }
 
+const TAB_NAME_PREFIX = 'dalat_tab_v1:';
+const TAB_LEAVE_SECRET_KEY = 'dalat_tab_leave_secret_v1';
+let fallbackTabId = '';
+let fallbackLeaveSecret = '';
+
+function generateRandomHex(minLength = 32): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const bytes = new Uint8Array(Math.ceil(minLength / 2));
+    crypto.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  let out = '';
+  while (out.length < minLength) {
+    out += Math.random().toString(16).slice(2);
+  }
+  return out.slice(0, minLength);
+}
+
+/**
+ * Generates & persists a private per-tab `leaveSecret` (>=24 chars) stored in `sessionStorage`
+ * (`dalat_tab_leave_secret_v1`) so it survives reload in the same tab while preventing spoofed evictions.
+ */
+function getOrCreateTabLeaveSecret(): string {
+  if (typeof window === 'undefined') {
+    if (!fallbackLeaveSecret) {
+      fallbackLeaveSecret = generateRandomHex(32);
+    }
+    return fallbackLeaveSecret;
+  }
+  try {
+    const existing = sessionStorage.getItem(TAB_LEAVE_SECRET_KEY)?.trim();
+    if (existing && existing.length >= 24 && existing.length <= 80) {
+      fallbackLeaveSecret = existing;
+      return existing;
+    }
+    const generated =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : generateRandomHex(32);
+    sessionStorage.setItem(TAB_LEAVE_SECRET_KEY, generated);
+    fallbackLeaveSecret = generated;
+    return generated;
+  } catch {
+    if (!fallbackLeaveSecret) {
+      fallbackLeaveSecret =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : generateRandomHex(32);
+    }
+    return fallbackLeaveSecret;
+  }
+}
+
+/**
+ * Returns a stable identifier for THIS specific browser tab:
+ * - Persists across F5 / Cmd+R / page.reload() in the same browsing context (via window.name)
+ * - Starts empty ("") in every new tab, new window, or duplicated tab -> distinct tabId for multi-tab testing!
+ */
+function getOrCreateTabSessionId(): string {
+  if (typeof window === 'undefined') {
+    if (!fallbackTabId) {
+      fallbackTabId = `tab-${Math.random().toString(36).slice(2, 12)}`;
+    }
+    return fallbackTabId;
+  }
+  try {
+    if (typeof window.name === 'string' && window.name.startsWith(TAB_NAME_PREFIX)) {
+      const existing = window.name.slice(TAB_NAME_PREFIX.length).trim();
+      if (existing.length >= 6 && existing.length <= 60) {
+        return existing;
+      }
+    }
+    const generated =
+      typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+        ? crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    window.name = `${TAB_NAME_PREFIX}${generated}`;
+    return generated;
+  } catch {
+    if (!fallbackTabId) {
+      fallbackTabId = `tab-${Math.random().toString(36).slice(2, 12)}`;
+    }
+    return fallbackTabId;
+  }
+}
+
 function syncUrlRoomCode(roomCode: string): void {
   if (typeof window === 'undefined' || !roomCode) return;
   try {
@@ -279,18 +379,143 @@ class MultiplayerClientController implements IMultiplayerController {
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
   private retryAttempt = 0;
   private periodicSyncTimer: ReturnType<typeof setInterval> | null = null;
+  private silenceWatchdogTimer: ReturnType<typeof setInterval> | null = null;
   private syncBurstTimers: Array<ReturnType<typeof setTimeout>> = [];
 
   private localNumericId = -1;
+  private lastPacketRecvMs = 0;
   private readonly numericIdToSessionId = new Map<number, string>();
   private readonly peerBuffers = new Map<number, PeerSnapshotRingBuffer>();
   private clockSamples: Array<{ rttMs: number; offsetMs: number }> = [];
+  private pendingPolaroidAcks: Array<{
+    resolve: (ack: PolaroidPinAck) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }> = [];
 
   // Track last sent metadata so store subscriptions & direct controller calls never double-send
   private lastSentProfileKey = '';
   private lastSentHeldItem: HeldItemId = 'soy_milk';
   private lastSentEmote: EmoteId = 'none';
   private storeSubscribed = false;
+  private unloadSubscribed = false;
+  private networkEventsSubscribed = false;
+  private unloadBeaconSent = false;
+
+  private markPacketReceived(): void {
+    this.lastPacketRecvMs = performance.now();
+    if (this.room && (typeof navigator === 'undefined' || navigator.onLine !== false)) {
+      const st = useGameStore.getState();
+      if (!st.connected || st.connecting) {
+        st.setNetworkStatus({ connected: true, connecting: false });
+      }
+    }
+  }
+
+  private flushPendingPolaroidAcks(reason: string): void {
+    while (this.pendingPolaroidAcks.length > 0) {
+      const item = this.pendingPolaroidAcks.shift()!;
+      clearTimeout(item.timer);
+      item.resolve({ ok: false, reason });
+    }
+  }
+
+  private sendLeaveTabSignal(roomId: string, sessionId: string, preferBeacon: boolean): void {
+    if (!roomId || !sessionId) return;
+    const tabId = getOrCreateTabSessionId();
+    const leaveSecret = getOrCreateTabLeaveSecret();
+    const { httpUrl } = resolveServerEndpoints();
+    const payload = JSON.stringify({
+      roomId,
+      sessionId,
+      tabId,
+      leaveSecret,
+    });
+
+    if (
+      preferBeacon &&
+      typeof navigator !== 'undefined' &&
+      typeof navigator.sendBeacon === 'function'
+    ) {
+      try {
+        const queued = navigator.sendBeacon(
+          `${httpUrl}/api/leave-tab`,
+          new Blob([payload], { type: 'text/plain;charset=UTF-8' })
+        );
+        if (queued) return;
+      } catch {
+        // fall through to keepalive fetch
+      }
+    }
+
+    try {
+      void fetch(`${httpUrl}/api/leave-tab`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+        keepalive: true,
+      }).catch(() => {});
+    } catch {
+      // ignore unload fetch errors
+    }
+  }
+
+  private ensureNetworkLifecycleBridge(): void {
+    if (this.networkEventsSubscribed || typeof window === 'undefined') return;
+    this.networkEventsSubscribed = true;
+
+    window.addEventListener('offline', () => {
+      if (this.manuallyDisconnected) return;
+      useGameStore.getState().setNetworkStatus({ connected: false, connecting: true });
+    });
+
+    window.addEventListener('online', () => {
+      if (this.manuallyDisconnected) return;
+      if (this.room) {
+        try {
+          this.room.send('ping_sync', { clientSendMs: Date.now() });
+        } catch {
+          // ignore transient socket error while Colyseus reconnects
+        }
+      } else {
+        this.clearRetryTimer();
+        void this.connect(this.desiredRoomCode);
+      }
+    });
+
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden && this.room) {
+        this.lastPacketRecvMs = performance.now();
+        try {
+          this.room.send('ping_sync', { clientSendMs: Date.now() });
+        } catch {
+          // ignore
+        }
+      }
+    });
+  }
+
+  private ensureUnloadBridge(): void {
+    if (this.unloadSubscribed || typeof window === 'undefined') return;
+    this.unloadSubscribed = true;
+
+    const handleTabUnload = () => {
+      if (this.unloadBeaconSent) return;
+      const activeRoom = this.room;
+      if (!activeRoom) return;
+      this.unloadBeaconSent = true;
+
+      this.sendLeaveTabSignal(activeRoom.roomId, activeRoom.sessionId, true);
+
+      try {
+        void activeRoom.leave(true).catch(() => {});
+      } catch {
+        // ignore socket close errors during page unload
+      }
+    };
+
+    window.addEventListener('pagehide', handleTabUnload);
+    window.addEventListener('beforeunload', handleTabUnload);
+  }
 
   private ensureStoreBridge(): void {
     if (this.storeSubscribed) return;
@@ -317,8 +542,24 @@ class MultiplayerClientController implements IMultiplayerController {
     });
   }
 
+  private buildJoinClientOptions() {
+    const store = useGameStore.getState();
+    return {
+      tabId: getOrCreateTabSessionId(),
+      leaveSecret: getOrCreateTabLeaveSecret(),
+      displayName: store.displayName,
+      outfit: store.outfit,
+      heldItem: store.heldItem,
+      x: store.localTransient.x,
+      z: store.localTransient.z,
+    };
+  }
+
   public async connect(preferredRoomCode?: string): Promise<void> {
     this.ensureStoreBridge();
+    this.ensureUnloadBridge();
+    this.ensureNetworkLifecycleBridge();
+    this.unloadBeaconSent = false;
     this.manuallyDisconnected = false;
     this.clearRetryTimer();
 
@@ -346,13 +587,7 @@ class MultiplayerClientController implements IMultiplayerController {
     store.setNetworkStatus({ connecting: true });
 
     const { wsUrl, httpUrl } = resolveServerEndpoints();
-    const joinOptions = {
-      displayName: store.displayName,
-      outfit: store.outfit,
-      heldItem: store.heldItem,
-      x: store.localTransient.x,
-      z: store.localTransient.z,
-    };
+    const joinOptions = this.buildJoinClientOptions();
 
     try {
       this.client = new Client(wsUrl);
@@ -406,38 +641,7 @@ class MultiplayerClientController implements IMultiplayerController {
         joinedRoom = await this.client.joinOrCreate<ReflectedRoomState>(ROOM_NAME, joinOptions);
       }
 
-      // Configure automatic Colyseus SDK reconnection (matches server allowReconnection(45))
-      joinedRoom.reconnection.enabled = true;
-      joinedRoom.reconnection.minUptime = 0;
-      joinedRoom.reconnection.maxRetries = 15;
-
-      this.teardownActiveRoomResources();
-      this.room = joinedRoom;
-      this.retryAttempt = 0;
-
-      const finalCode = resolvedRoomCode || store.roomCode || 'MAY-01';
-      const finalChannel = resolvedChannelName || store.channelName || 'Sương Sớm Cầu Đất #1';
-      this.desiredRoomCode = finalCode;
-      syncUrlRoomCode(finalCode);
-
-      this.lastSentProfileKey = buildProfileKey(store.displayName, store.outfit);
-      this.lastSentHeldItem = store.heldItem;
-      this.lastSentEmote = store.activeEmote;
-
-      useGameStore.getState().resetPeers();
-      useGameStore.getState().setNetworkStatus({
-        connected: true,
-        connecting: false,
-        localSessionId: joinedRoom.sessionId,
-        roomId: joinedRoom.roomId,
-        roomCode: finalCode,
-        channelName: finalChannel,
-      });
-
-      this.bindRoomHandlers(joinedRoom);
-      joinedRoom.send('req_world_init');
-      this.startCristianClockSync(joinedRoom);
-      void this.refreshChannels();
+      this.activateJoinedRoom(joinedRoom, resolvedRoomCode, resolvedChannelName);
     } catch {
       // Graceful offline fallback: never crash the 3D Highland world!
       const st = useGameStore.getState();
@@ -452,10 +656,55 @@ class MultiplayerClientController implements IMultiplayerController {
     }
   }
 
+  private activateJoinedRoom(
+    joinedRoom: Room<any, ReflectedRoomState>,
+    resolvedRoomCode?: string,
+    resolvedChannelName?: string
+  ): { finalCode: string; finalChannel: string } {
+    const store = useGameStore.getState();
+
+    // Configure automatic Colyseus SDK reconnection (matches server allowReconnection(45))
+    joinedRoom.reconnection.enabled = true;
+    joinedRoom.reconnection.minUptime = 0;
+    joinedRoom.reconnection.maxRetries = 15;
+
+    this.teardownActiveRoomResources();
+    this.room = joinedRoom;
+    this.retryAttempt = 0;
+    this.lastPacketRecvMs = performance.now();
+
+    const finalCode = resolvedRoomCode || store.roomCode || 'MAY-01';
+    const finalChannel = resolvedChannelName || store.channelName || 'Sương Sớm Cầu Đất #1';
+    this.desiredRoomCode = finalCode;
+    syncUrlRoomCode(finalCode);
+
+    this.lastSentProfileKey = buildProfileKey(store.displayName, store.outfit);
+    this.lastSentHeldItem = store.heldItem;
+    this.lastSentEmote = store.activeEmote;
+
+    useGameStore.getState().resetPeers();
+    useGameStore.getState().setNetworkStatus({
+      connected: true,
+      connecting: false,
+      localSessionId: joinedRoom.sessionId,
+      roomId: joinedRoom.roomId,
+      roomCode: finalCode,
+      channelName: finalChannel,
+      occupiedBenches: {},
+    });
+
+    this.bindRoomHandlers(joinedRoom);
+    joinedRoom.send('req_world_init');
+    this.startCristianClockSync(joinedRoom);
+    void this.refreshChannels();
+    return { finalCode, finalChannel };
+  }
+
   public async disconnect(): Promise<void> {
     this.manuallyDisconnected = true;
     this.clearRetryTimer();
     this.clearSyncTimers();
+    this.flushPendingPolaroidAcks('Đã ngắt kết nối khỏi phòng săn mây.');
 
     const active = this.room;
     this.room = null;
@@ -464,6 +713,7 @@ class MultiplayerClientController implements IMultiplayerController {
     this.peerBuffers.clear();
 
     if (active) {
+      this.sendLeaveTabSignal(active.roomId, active.sessionId, false);
       try {
         await active.leave(true);
       } catch {
@@ -480,13 +730,97 @@ class MultiplayerClientController implements IMultiplayerController {
     });
   }
 
-  public async switchChannel(roomCodeOrId: string): Promise<void> {
-    const target = roomCodeOrId.trim();
-    if (!target) return;
-    await this.disconnect();
-    this.manuallyDisconnected = false;
-    this.desiredRoomCode = target;
-    await this.connect(target);
+  public async switchChannel(roomCodeOrId: string): Promise<SwitchChannelResult> {
+    this.ensureStoreBridge();
+    this.ensureUnloadBridge();
+    this.ensureNetworkLifecycleBridge();
+
+    const rawTarget = (roomCodeOrId || '').trim();
+    if (!rawTarget) {
+      const msg = 'Vui lòng nhập mã phòng hợp lệ (3–14 ký tự chữ hoặc số).';
+      useGameStore.getState().showToast(msg);
+      return { ok: false, error: msg };
+    }
+
+    const stBefore = useGameStore.getState();
+    const isKnownRoomId = stBefore.availableChannels.some((c) => c.roomId === rawTarget);
+    const normalized = isKnownRoomId ? rawTarget : normalizeRoomCode(rawTarget);
+
+    if (!isKnownRoomId && !ROOM_CODE_REGEX.test(normalized)) {
+      const msg = 'Mã phòng cần từ 3–14 ký tự chữ, số hoặc dấu gạch ngang (VD: DALAT-01).';
+      stBefore.showToast(msg);
+      return { ok: false, error: msg };
+    }
+
+    const { wsUrl, httpUrl } = resolveServerEndpoints();
+    const joinOptions = this.buildJoinClientOptions();
+
+    try {
+      const res = await fetch(`${httpUrl}/api/join-channel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomCodeOrId: normalized,
+          strictCustomCode: !isKnownRoomId,
+          reserveSeat: true,
+          clientOptions: joinOptions,
+        }),
+        signal: AbortSignal.timeout(5000),
+      });
+
+      if (!res.ok) {
+        const errPayload = (await res.json().catch(() => null)) as { error?: string } | null;
+        const msg =
+          (errPayload && typeof errPayload.error === 'string' && errPayload.error) ||
+          (res.status === 429
+            ? 'Bạn đổi phòng quá nhanh, vui lòng đợi ít giây rồi thử lại nhé.'
+            : 'Không thể chuyển sang kênh săn mây này lúc này.');
+        useGameStore.getState().showToast(msg);
+        return { ok: false, error: msg };
+      }
+
+      const data = (await res.json()) as {
+        roomId: string;
+        roomCode: string;
+        channelName: string;
+        fallbackFromFull?: boolean;
+        seatReservation?: Parameters<Client['consumeSeatReservation']>[0];
+      };
+
+      if (data.fallbackFromFull) {
+        useGameStore
+          .getState()
+          .showToast('Kênh bạn chọn đã đầy 50/50 người, đã chuyển sang đồi mây gần nhất!');
+      }
+
+      this.manuallyDisconnected = false;
+      this.unloadBeaconSent = false;
+      this.clearRetryTimer();
+      useGameStore.getState().setNetworkStatus({ connecting: true });
+
+      if (!this.client) {
+        this.client = new Client(wsUrl);
+      }
+
+      const joinedRoom = data.seatReservation
+        ? await this.client.consumeSeatReservation<ReflectedRoomState>(data.seatReservation)
+        : await this.client.joinById<ReflectedRoomState>(data.roomId, joinOptions);
+
+      const { finalCode, finalChannel } = this.activateJoinedRoom(
+        joinedRoom,
+        data.roomCode,
+        data.channelName
+      );
+      return { ok: true, roomCode: finalCode, channelName: finalChannel };
+    } catch {
+      const msg = 'Không thể kết nối tới kênh săn mây lúc này, vui lòng thử lại.';
+      useGameStore.getState().setNetworkStatus({
+        connected: Boolean(this.room),
+        connecting: false,
+      });
+      useGameStore.getState().showToast(msg);
+      return { ok: false, error: msg };
+    }
   }
 
   public async refreshChannels(): Promise<void> {
@@ -510,10 +844,31 @@ class MultiplayerClientController implements IMultiplayerController {
   }
 
   public sendMove(input: ClientMoveInput): void {
-    if (!this.room || !useGameStore.getState().connected) return;
+    const st = useGameStore.getState();
+    if (!this.room || (!st.connected && !st.connecting)) return;
     try {
       const packet = encodeClientMove(input);
       this.room.sendBytes('mv', packet);
+    } catch {
+      // ignore transient socket buffer errors during reconnect
+    }
+  }
+
+  public sendTeleport(
+    x: number,
+    z: number,
+    yaw?: number,
+    opts?: { y?: number; qaOverride?: boolean }
+  ): void {
+    if (!this.room) return;
+    try {
+      this.room.send('teleport', {
+        x,
+        z,
+        yaw,
+        ...(opts?.y !== undefined ? { y: opts.y } : {}),
+        ...(opts?.qaOverride ? { qaOverride: true } : {}),
+      });
     } catch {
       // ignore transient socket buffer errors during reconnect
     }
@@ -654,18 +1009,46 @@ class MultiplayerClientController implements IMultiplayerController {
     });
   }
 
-  public pinPolaroid(entry: Omit<PolaroidEntry, 'id' | 'likes' | 'createdAt'>): void {
+  public async pinPolaroid(
+    entry: Omit<PolaroidEntry, 'id' | 'likes' | 'createdAt'>
+  ): Promise<PolaroidPinAck> {
     if (this.room && useGameStore.getState().connected) {
-      this.room.send('polaroid_pin', entry);
-      return;
+      const activeRoom = this.room;
+      return new Promise<PolaroidPinAck>((resolve) => {
+        const timer = setTimeout(() => {
+          const idx = this.pendingPolaroidAcks.findIndex((p) => p.timer === timer);
+          if (idx >= 0) {
+            this.pendingPolaroidAcks.splice(idx, 1);
+          }
+          const reason = 'Máy chủ phản hồi chậm, vui lòng thử lại.';
+          useGameStore.getState().showToast(reason);
+          resolve({ ok: false, reason });
+        }, 6000);
+
+        this.pendingPolaroidAcks.push({ resolve, timer });
+        try {
+          activeRoom.send('polaroid_pin', entry);
+        } catch {
+          clearTimeout(timer);
+          const idx = this.pendingPolaroidAcks.findIndex((p) => p.timer === timer);
+          if (idx >= 0) {
+            this.pendingPolaroidAcks.splice(idx, 1);
+          }
+          const reason = 'Không thể gửi ảnh lên bảng kỷ niệm lúc này.';
+          useGameStore.getState().showToast(reason);
+          resolve({ ok: false, reason });
+        }
+      });
     }
 
+    const polaroidId = `local-pol-${Date.now()}`;
     useGameStore.getState().prependPolaroid({
       ...entry,
-      id: `local-pol-${Date.now()}`,
+      id: polaroidId,
       likes: 1,
       createdAt: Date.now(),
     });
+    return { ok: true, polaroidId };
   }
 
   public likePolaroid(polaroidId: string): void {
@@ -790,10 +1173,11 @@ class MultiplayerClientController implements IMultiplayerController {
       }
 
       const spanMs = b.recvMs - a.recvMs;
+      const tickDelta = (b.serverTick - a.serverTick + 65536) % 65536;
       const stepDist = Math.hypot(b.x - a.x, b.z - a.z);
 
-      // Snap cleanly on Landmark Fast-Travel jumps (> 18m)
-      if (spanMs < 1 || stepDist > 18) {
+      // Snap cleanly on >12m teleports or wraparound tick jumps without velocity tangent overshoot!
+      if (spanMs < 1 || stepDist > 12 || tickDelta > 120) {
         peer.x = b.x;
         peer.y = b.y;
         peer.z = b.z;
@@ -810,7 +1194,10 @@ class MultiplayerClientController implements IMultiplayerController {
       const t = clamp((renderTimeMs - a.recvMs) / spanMs, 0, 1);
       const t2 = t * t;
       const t3 = t2 * t;
-      const dtSec = spanMs / 1000;
+      const dtSec =
+        tickDelta > 0 && tickDelta <= 48
+          ? tickDelta / WORLD_CONSTANTS.NET_TICK_HZ
+          : spanMs / 1000;
 
       // Cubic Hermite basis functions
       const h00 = 2 * t3 - 3 * t2 + 1;
@@ -818,10 +1205,22 @@ class MultiplayerClientController implements IMultiplayerController {
       const h01 = -2 * t3 + 3 * t2;
       const h11 = t3 - t2;
 
-      const m0x = a.vx * dtSec;
-      const m1x = b.vx * dtSec;
-      const m0z = a.vz * dtSec;
-      const m1z = b.vz * dtSec;
+      const maxTangent = Math.max(0.25, stepDist * 1.35);
+      let m0x = a.vx * dtSec;
+      let m0z = a.vz * dtSec;
+      const m0Len = Math.hypot(m0x, m0z);
+      if (m0Len > maxTangent) {
+        m0x = (m0x / m0Len) * maxTangent;
+        m0z = (m0z / m0Len) * maxTangent;
+      }
+
+      let m1x = b.vx * dtSec;
+      let m1z = b.vz * dtSec;
+      const m1Len = Math.hypot(m1x, m1z);
+      if (m1Len > maxTangent) {
+        m1x = (m1x / m1Len) * maxTangent;
+        m1z = (m1z / m1Len) * maxTangent;
+      }
 
       const ix = h00 * a.x + h10 * m0x + h01 * b.x + h11 * m1x;
       const iz = h00 * a.z + h10 * m0z + h01 * b.z + h11 * m1z;
@@ -882,6 +1281,7 @@ class MultiplayerClientController implements IMultiplayerController {
     // Reconcile full state on initial ROOM_STATE & after reconnect decodeResync
     room.onStateChange((state) => {
       if (!state) return;
+      this.markPacketReceived();
       if (state.roomCode || state.channelName) {
         const st = useGameStore.getState();
         if (
@@ -899,11 +1299,13 @@ class MultiplayerClientController implements IMultiplayerController {
       this.reconcileOccupiedBenches(state);
     });
 
-    // 2. 12 Hz Binary Snapshot Stream
+    // 2. 12 Hz Binary Snapshot Stream + AOI Tracking
     room.onMessage('snap', (bytes: Uint8Array) => {
       const decoded = decodeWorldSnapshot(bytes);
       if (!decoded) return;
+      this.markPacketReceived();
       const recvMs = performance.now();
+      const stSnap = useGameStore.getState();
 
       for (let i = 0; i < decoded.nearPeers.length; i++) {
         const p = decoded.nearPeers[i];
@@ -916,6 +1318,7 @@ class MultiplayerClientController implements IMultiplayerController {
         }
         buf.push(
           recvMs,
+          decoded.serverTick,
           p.x,
           p.y,
           p.z,
@@ -927,6 +1330,12 @@ class MultiplayerClientController implements IMultiplayerController {
           p.grounded,
           p.warmBuff
         );
+
+        const sid = this.numericIdToSessionId.get(p.numericId);
+        if (sid && stSnap.peers[sid]) {
+          stSnap.peers[sid].lastNearSnapMs = recvMs;
+          stSnap.peers[sid].inNearAoi = true;
+        }
       }
 
       // Update 2 Hz far-tier lantern silhouettes when sent (every 6th tick)
@@ -935,9 +1344,37 @@ class MultiplayerClientController implements IMultiplayerController {
           decoded.farPeers.length > 0
             ? decoded.farPeers.filter((b) => b.numericId !== this.localNumericId)
             : [];
-        const currentFar = useGameStore.getState().farBeacons;
-        if (filteredFar.length > 0 || currentFar.length > 0) {
-          useGameStore.getState().setFarBeacons(filteredFar);
+        const stNow = useGameStore.getState();
+        if (filteredFar.length > 0 || stNow.farBeacons.length > 0) {
+          stNow.setFarBeacons(filteredFar);
+        }
+        // Keep far human/NPC peer coordinates fresh at 2 Hz for PocketMap & "Tới chỗ bạn" teleport, and mark out of near AOI!
+        for (let i = 0; i < filteredFar.length; i++) {
+          const b = filteredFar[i];
+          const sid = this.numericIdToSessionId.get(b.numericId);
+          if (!sid) continue;
+          const peer = stNow.peers[sid];
+          if (peer) {
+            peer.inNearAoi = false;
+            if (Math.abs(peer.x - b.x) > 0.2 || Math.abs(peer.z - b.z) > 0.2) {
+              peer.x = b.x;
+              peer.y = b.y;
+              peer.z = b.z;
+            }
+          }
+        }
+      }
+
+      // Mark peers whose near-tier snapshots stopped arriving (>1500ms) as out of near AOI
+      for (const sid in stSnap.peers) {
+        const peer = stSnap.peers[sid];
+        if (
+          peer &&
+          peer.inNearAoi !== false &&
+          peer.lastNearSnapMs !== undefined &&
+          recvMs - peer.lastNearSnapMs > 1500
+        ) {
+          peer.inNearAoi = false;
         }
       }
     });
@@ -954,6 +1391,7 @@ class MultiplayerClientController implements IMultiplayerController {
         polaroids?: PolaroidEntry[];
         windChimeNotes?: WindChimeNote[];
       }) => {
+        this.markPacketReceived();
         if (typeof payload?.numericId === 'number') {
           this.localNumericId = payload.numericId;
         }
@@ -976,10 +1414,27 @@ class MultiplayerClientController implements IMultiplayerController {
       }
     );
 
+    // 3b. Authoritative Server Pose Correction (e.g. teleport cooldown / clamp reconciliation)
+    room.onMessage('pose_correct', (corr: ServerPoseCorrection) => {
+      this.markPacketReceived();
+      if (!corr || !Number.isFinite(corr.x) || !Number.isFinite(corr.z)) return;
+      const lt = useGameStore.getState().localTransient;
+      lt.x = corr.x;
+      lt.y = Number.isFinite(corr.y) ? corr.y : sampleWalkableHeight(corr.x, corr.z);
+      lt.z = corr.z;
+      if (typeof corr.yaw === 'number' && Number.isFinite(corr.yaw)) {
+        lt.yaw = corr.yaw;
+      }
+      lt.vx = 0;
+      lt.vy = 0;
+      lt.vz = 0;
+    });
+
     // 4. Cristian Clock Sync Pong
     room.onMessage(
       'pong_sync',
       (payload: { clientSendMs?: number; serverEpochMs?: number }) => {
+        this.markPacketReceived();
         if (
           typeof payload?.clientSendMs !== 'number' ||
           typeof payload?.serverEpochMs !== 'number'
@@ -1108,11 +1563,11 @@ class MultiplayerClientController implements IMultiplayerController {
           }
           st.setSeatedBench(ack.benchId ?? null);
         } else {
-          const prevSeat = st.seatedBenchId ? resolveBenchSeatTransform(st.seatedBenchId) : null;
-          if (prevSeat) {
-            st.localTransient.x = prevSeat.position[0] + Math.sin(prevSeat.yaw) * 0.85;
-            st.localTransient.z = prevSeat.position[2] + Math.cos(prevSeat.yaw) * 0.85;
-            st.localTransient.y = sampleWalkableHeight(st.localTransient.x, st.localTransient.z);
+          const standPos = st.seatedBenchId ? computeBenchStandUpPosition(st.seatedBenchId) : null;
+          if (standPos) {
+            st.localTransient.x = standPos[0];
+            st.localTransient.y = standPos[1];
+            st.localTransient.z = standPos[2];
           }
           st.setSeatedBench(null);
           if (ack?.reason) {
@@ -1124,19 +1579,34 @@ class MultiplayerClientController implements IMultiplayerController {
 
     // 7. Acoustic Campfire Jam
     room.onMessage('jam_note', (jam: AcousticJamNote) => {
+      this.markPacketReceived();
       if (jam && typeof jam.chordIndex === 'number') {
         useGameStore.getState().setLastJamNote(jam);
       }
     });
 
-    // 8. Polaroid Wall & Wind-Chime Live Broadcasts
+    // 8. Polaroid Wall Ack & Wind-Chime Live Broadcasts
+    room.onMessage('polaroid_pin_ack', (ack: PolaroidPinAck) => {
+      this.markPacketReceived();
+      const pending = this.pendingPolaroidAcks.shift();
+      if (pending) {
+        clearTimeout(pending.timer);
+        pending.resolve(ack || { ok: false, reason: 'Không thể ghim ảnh lúc này.' });
+      }
+      if (ack && !ack.ok && ack.reason) {
+        useGameStore.getState().showToast(ack.reason);
+      }
+    });
+
     room.onMessage('polaroid_added', (entry: PolaroidEntry) => {
+      this.markPacketReceived();
       if (entry && entry.id) {
         useGameStore.getState().prependPolaroid(entry);
       }
     });
 
     room.onMessage('polaroid_liked', (patch: { id: string; likes: number }) => {
+      this.markPacketReceived();
       if (!patch?.id) return;
       const st = useGameStore.getState();
       st.setPolaroids(
@@ -1145,6 +1615,7 @@ class MultiplayerClientController implements IMultiplayerController {
     });
 
     room.onMessage('windchime_added', (note: WindChimeNote) => {
+      this.markPacketReceived();
       if (note && note.id) {
         useGameStore.getState().prependWindChimeNote(note);
       }
@@ -1152,10 +1623,11 @@ class MultiplayerClientController implements IMultiplayerController {
 
     // 9. Connection Drop / Reconnect / Leave Lifecycle
     room.onDrop(() => {
-      useGameStore.getState().setNetworkStatus({ connecting: true });
+      useGameStore.getState().setNetworkStatus({ connected: false, connecting: true });
     });
 
     room.onReconnect(() => {
+      this.lastPacketRecvMs = performance.now();
       useGameStore.getState().setNetworkStatus({
         connected: true,
         connecting: false,
@@ -1168,6 +1640,7 @@ class MultiplayerClientController implements IMultiplayerController {
       if (this.room !== room) return;
       this.room = null;
       this.clearSyncTimers();
+      this.flushPendingPolaroidAcks('Phiên kết nối đã đóng, vui lòng ghim lại ảnh.');
       this.numericIdToSessionId.clear();
       this.peerBuffers.clear();
 
@@ -1175,7 +1648,7 @@ class MultiplayerClientController implements IMultiplayerController {
       st.resetPeers();
       st.setNetworkStatus({
         connected: false,
-        connecting: false,
+        connecting: !this.manuallyDisconnected,
         occupiedBenches: {},
       });
 
@@ -1190,7 +1663,7 @@ class MultiplayerClientController implements IMultiplayerController {
     player: ReflectedPlayer,
     sessionId: string
   ): void {
-    if (!player || player.isBot) return;
+    if (!player) return;
     if (sessionId === room.sessionId) {
       if (this.localNumericId === -1 && Number.isFinite(player.spawnX) && Number.isFinite(player.spawnZ)) {
         const lt = useGameStore.getState().localTransient;
@@ -1236,6 +1709,7 @@ class MultiplayerClientController implements IMultiplayerController {
     if (
       existing &&
       existing.numericId === player.numericId &&
+      existing.isBot === isBot &&
       existing.displayName === displayName &&
       existing.heldItem === heldItem &&
       existing.emote === emote &&
@@ -1306,6 +1780,8 @@ class MultiplayerClientController implements IMultiplayerController {
       running: existing?.running ?? latestSample?.running ?? false,
       grounded: existing?.grounded ?? latestSample?.grounded ?? true,
       warmBuff: existing?.warmBuff ?? latestSample?.warmBuff ?? true,
+      lastNearSnapMs: existing?.lastNearSnapMs ?? latestSample?.recvMs,
+      inNearAoi: existing?.inNearAoi ?? Boolean(latestSample),
     };
 
     useGameStore.getState().upsertPeer(nextPeer);
@@ -1384,6 +1860,32 @@ class MultiplayerClientController implements IMultiplayerController {
       this.syncBurstTimers.push(t);
     }
 
+    // Packet-silence detector (<4s watchdog; triggers within a 3s network outage!)
+    this.silenceWatchdogTimer = setInterval(() => {
+      if (this.room !== room) return;
+      if (typeof document !== 'undefined' && document.hidden) {
+        this.lastPacketRecvMs = performance.now();
+        return;
+      }
+      const silenceMs = performance.now() - this.lastPacketRecvMs;
+      const browserOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+
+      if (browserOffline || silenceMs > 2600) {
+        const st = useGameStore.getState();
+        if (st.connected || !st.connecting) {
+          st.setNetworkStatus({ connected: false, connecting: true });
+        }
+      }
+
+      if (!browserOffline && silenceMs > 1600) {
+        try {
+          room.send('ping_sync', { clientSendMs: Date.now() });
+        } catch {
+          // ignore transient socket buffer error while reconnecting
+        }
+      }
+    }, 500);
+
     // Gentle drift refresh + channel count refresh every 25s
     this.periodicSyncTimer = setInterval(() => {
       if (this.room === room && useGameStore.getState().connected) {
@@ -1421,10 +1923,15 @@ class MultiplayerClientController implements IMultiplayerController {
       clearInterval(this.periodicSyncTimer);
       this.periodicSyncTimer = null;
     }
+    if (this.silenceWatchdogTimer) {
+      clearInterval(this.silenceWatchdogTimer);
+      this.silenceWatchdogTimer = null;
+    }
   }
 
   private teardownActiveRoomResources(): void {
     this.clearSyncTimers();
+    this.flushPendingPolaroidAcks('Đã chuyển kênh săn mây.');
     if (this.room) {
       const stale = this.room;
       this.room = null;

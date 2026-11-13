@@ -29,6 +29,34 @@ const _peerNormMat = new THREE.Matrix3();
 const _peerHitPt = new THREE.Vector3();
 const _peerHitNorm = new THREE.Vector3();
 
+// Per-frame screen-space nametag decluttering & live near-avatar tracking (zero React churn)
+interface PlacedScreenLabel {
+  x: number;
+  y: number;
+  priority: boolean;
+}
+let labelLayoutFrameTime = -1;
+const placedScreenLabels: PlacedScreenLabel[] = [];
+const liveVisibleNearNumericIds = new Set<number>();
+const farBeaconNumericIdsScratch = new Set<number>();
+
+function isPeerInActiveNearAoi(
+  peer: RemotePeerState,
+  localX: number,
+  localZ: number,
+  nowPerf: number,
+  farBeaconNumericIds: Set<number>
+): boolean {
+  if (farBeaconNumericIds.has(peer.numericId)) return false;
+  if (peer.inNearAoi === false) return false;
+  if (peer.lastNearSnapMs !== undefined && nowPerf - peer.lastNearSnapMs > 1500) {
+    return false;
+  }
+  const dx = peer.x - localX;
+  const dz = peer.z - localZ;
+  return dx * dx + dz * dz <= 95 * 95;
+}
+
 function outfitSignature(p: PeerAppearanceSlot): string {
   const o = p.outfit;
   return `${p.sessionId}|${p.displayName}|${p.heldItem}|${o.gender || ''}|${o.coatStyle}|${o.coatColor}|${o.scarfColor}|${o.headwear}|${o.neckwear || ''}|${o.eyewear || ''}|${o.bagStyle || ''}|${o.hairColor}|${o.backpack ? 1 : 0}`;
@@ -107,7 +135,7 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
   const latestBubble = useGameStore((s) => {
     for (let i = s.chatBubbles.length - 1; i >= 0; i--) {
       const b = s.chatBubbles[i];
-      if (b.senderId === slot.sessionId || b.senderName === slot.displayName) {
+      if (b.senderId === slot.sessionId) {
         return b;
       }
     }
@@ -129,23 +157,32 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
 
     const pill = document.createElement('div');
     pill.setAttribute('data-dalat-peer-pill', 'true');
-    pill.title = `Click để tương tác với ${slot.displayName}`;
+    pill.title = slot.isBot
+      ? `${slot.displayName} • Lữ khách dạo đồi (Chạm để chào)`
+      : `${slot.displayName} • Người chơi trực tuyến (Chạm để tương tác)`;
     pill.style.cssText =
-      'display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;background:rgba(16,23,36,0.78);border:1px solid rgba(255,232,204,0.28);color:#F6EFE4;font-size:11.5px;font-weight:500;letter-spacing:0.01em;white-space:nowrap;pointer-events:auto;cursor:pointer;transition:transform 140ms ease,border-color 140ms ease,box-shadow 140ms ease;';
+      'display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:999px;background:rgba(15,22,34,0.82);border:1px solid rgba(255,232,204,0.28);color:#F8F3EB;font-size:12px;font-weight:500;letter-spacing:0.01em;white-space:nowrap;pointer-events:auto;cursor:pointer;transition:transform 140ms ease,border-color 140ms ease,box-shadow 140ms ease;';
 
-    pill.addEventListener('click', (e) => {
+    const onPillClick = (e: MouseEvent) => {
       e.stopPropagation();
       selectThisPeer();
-    });
+    };
+    pill.addEventListener('click', onPillClick);
 
-    const dot = document.createElement('span');
-    dot.style.cssText = `width:6px;height:6px;border-radius:50%;background:${slot.isBot ? '#A8C5DA' : '#82D69E'};box-shadow:0 0 6px rgba(130,214,158,0.8);`;
+    const badge = document.createElement('span');
+    if (slot.isBot) {
+      badge.textContent = '🌲';
+      badge.style.cssText = 'font-size:12px;line-height:1;opacity:0.9;';
+    } else {
+      badge.style.cssText =
+        'width:7px;height:7px;border-radius:50%;background:#82D69E;box-shadow:0 0 7px rgba(130,214,158,0.85);flex-shrink:0;';
+    }
 
     const nameSpan = document.createElement('span');
     const propIcon = heldItemBadgeIcon(slot.heldItem);
     nameSpan.textContent = propIcon ? `${slot.displayName} ${propIcon}` : slot.displayName;
 
-    pill.appendChild(dot);
+    pill.appendChild(badge);
     pill.appendChild(nameSpan);
     wrap.appendChild(bubble);
     wrap.appendChild(pill);
@@ -156,12 +193,14 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     bubbleElRef.current = bubble;
 
     return () => {
+      liveVisibleNearNumericIds.delete(slot.numericId);
+      pill.removeEventListener('click', onPillClick);
       wrap.remove();
       labelElRef.current = null;
       pillElRef.current = null;
       bubbleElRef.current = null;
     };
-  }, [slot.displayName, slot.heldItem, slot.isBot]);
+  }, [slot.displayName, slot.heldItem, slot.isBot, slot.numericId]);
 
   useEffect(() => {
     const pill = pillElRef.current;
@@ -211,7 +250,18 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
   });
   const seed = useMemo(() => ((slot.numericId * 0.61803398875) % 1) || 0.42, [slot.numericId]);
 
-  useFrame((_, rawDt) => {
+  useFrame(({ clock }, rawDt) => {
+    const frameTime = clock.elapsedTime;
+    if (frameTime !== labelLayoutFrameTime) {
+      labelLayoutFrameTime = frameTime;
+      placedScreenLabels.length = 0;
+      farBeaconNumericIdsScratch.clear();
+      const fb = useGameStore.getState().farBeacons;
+      for (let i = 0; i < fb.length; i++) {
+        farBeaconNumericIdsScratch.add(fb[i].numericId);
+      }
+    }
+
     const dt = Math.min(rawDt, 0.06);
     const st = useGameStore.getState();
     const peer = st.peers[slot.sessionId];
@@ -219,7 +269,25 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     const el = labelElRef.current;
 
     if (!grp || !peer) {
+      liveVisibleNearNumericIds.delete(slot.numericId);
       if (grp) grp.visible = false;
+      if (el) el.style.display = 'none';
+      return;
+    }
+
+    // Strict AOI pruning: hide 3D HighlandAvatar immediately when in farBeacons or >1500ms without near snapshot!
+    const nowPerf = performance.now();
+    if (
+      !isPeerInActiveNearAoi(
+        peer,
+        st.localTransient.x,
+        st.localTransient.z,
+        nowPerf,
+        farBeaconNumericIdsScratch
+      )
+    ) {
+      liveVisibleNearNumericIds.delete(slot.numericId);
+      grp.visible = false;
       if (el) el.style.display = 'none';
       return;
     }
@@ -227,12 +295,20 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     const isDressing = !st.hasEnteredWorld || st.activeModal === 'wardrobe';
     const overlapsDressingStage =
       isDressing && Math.hypot(peer.x - st.localTransient.x, peer.z - st.localTransient.z) < 2.8;
-    const hideForPhoto = (st.photoModeActive && st.photoHideCrowd) || overlapsDressingStage;
+    const hideForPhoto = st.photoModeActive && st.photoHideCrowd;
     grp.visible = !hideForPhoto;
     if (hideForPhoto) {
+      liveVisibleNearNumericIds.delete(slot.numericId);
       if (el) el.style.display = 'none';
       return;
     }
+    if (overlapsDressingStage) {
+      liveVisibleNearNumericIds.delete(slot.numericId);
+      grp.position.set(peer.x, -999, peer.z);
+      if (el) el.style.display = 'none';
+      return;
+    }
+    liveVisibleNearNumericIds.add(slot.numericId);
 
     let targetX = peer.x;
     let targetY = peer.y;
@@ -295,9 +371,7 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     }
 
     const jamAge = st.lastJamNote ? (Date.now() - st.lastJamNote.timestamp) / 1000 : 99;
-    const isPeerJam =
-      st.lastJamNote &&
-      (st.lastJamNote.senderId === slot.sessionId || st.lastJamNote.senderName === slot.displayName);
+    const isPeerJam = Boolean(st.lastJamNote && st.lastJamNote.senderId === slot.sessionId);
 
     const prevYaw = prevYawRef.current ?? grp.rotation.y;
     const yawDelta = shortestAngleDelta(prevYaw, grp.rotation.y);
@@ -308,7 +382,7 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     m.moving = peer.moving;
     m.running = peer.running;
     m.grounded = peer.grounded;
-    m.speed = Math.hypot(peer.vx, peer.vz) || (peer.moving ? (peer.running ? 6.6 : 3.7) : 0);
+    m.speed = Math.hypot(peer.vx, peer.vz) || (peer.moving ? (peer.running ? 6.6 : 2.45) : 0);
     m.seated = Boolean(peer.seatId);
     m.emote = peer.emote;
     m.warmBuff = peer.warmBuff;
@@ -318,7 +392,13 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     m.turnBank = -yawRate;
 
     if (el) {
-      if (st.photoModeActive || !st.hasEnteredWorld) {
+      if (
+        st.photoModeActive ||
+        !st.hasEnteredWorld ||
+        (st.quietMode &&
+          slot.isBot &&
+          Math.hypot(grp.position.x - st.localTransient.x, grp.position.z - st.localTransient.z) > 8)
+      ) {
         el.style.display = 'none';
       } else {
         const lt = st.localTransient;
@@ -332,11 +412,55 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
             el.style.display = 'none';
           } else {
             const sx = (_projVec.x * 0.5 + 0.5) * size.width;
-            const sy = (-_projVec.y * 0.5 + 0.5) * size.height;
-            const fade = dist <= 20 ? 1 : Math.max(0, 1 - (dist - 20) / (maxR - 20));
-            el.style.display = 'flex';
-            el.style.opacity = fade.toFixed(2);
-            el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -100%)`;
+            let sy = (-_projVec.y * 0.5 + 0.5) * size.height;
+            const centerBias = Math.max(0, 1 - Math.hypot(_projVec.x, _projVec.y) * 0.45);
+            const baseFade =
+              dist <= 14 ? 1 : Math.max(0, 1 - (dist - 14) / Math.max(1, maxR - 14));
+            const isPriorityLabel =
+              st.selectedPeerSessionId === slot.sessionId ||
+              st.nearbyPeer?.sessionId === slot.sessionId ||
+              Boolean(latestBubble);
+            let fade = isPriorityLabel
+              ? 1
+              : dist <= 12
+                ? baseFade
+                : baseFade * (0.45 + 0.55 * centerBias);
+
+            // Declutter overlapping 3D crowd nametags when multiple hikers/peers cluster closely
+            let overlapCount = 0;
+            for (let k = 0; k < placedScreenLabels.length; k++) {
+              const other = placedScreenLabels[k];
+              if (Math.abs(sx - other.x) < 88 && Math.abs(sy - other.y) < 30) {
+                overlapCount++;
+                if (isPriorityLabel && overlapCount === 1) {
+                  sy -= 24;
+                }
+              }
+            }
+
+            const pill = pillElRef.current;
+            if (!isPriorityLabel && overlapCount > 0) {
+              if (overlapCount >= 2 || dist > 9.5) {
+                fade = 0;
+              } else {
+                fade *= 0.28;
+                if (pill) {
+                  pill.style.transform = 'scale(0.86)';
+                }
+              }
+            } else if (pill) {
+              pill.style.transform = 'scale(1)';
+            }
+
+            if (fade < 0.08) {
+              el.style.display = 'none';
+            } else {
+              placedScreenLabels.push({ x: sx, y: sy, priority: isPriorityLabel });
+              el.style.display = 'flex';
+              el.style.zIndex = isPriorityLabel ? '12' : '4';
+              el.style.opacity = fade.toFixed(2);
+              el.style.transform = `translate3d(${sx.toFixed(1)}px, ${sy.toFixed(1)}px, 0) translate(-50%, -100%)`;
+            }
           }
         }
       }
@@ -468,9 +592,17 @@ function FarLanternSilhouettes({ nearSessionIds }: { nearSessionIds: Set<string>
 
     const t = clock.getElapsedTime();
     let idx = 0;
+    const renderedSilhouetteNumericIds = new Set<number>();
 
     for (let i = 0; i < st.farBeacons.length && idx < MAX_FAR_LANTERNS; i++) {
       const b = st.farBeacons[i];
+      if (
+        liveVisibleNearNumericIds.has(b.numericId) ||
+        renderedSilhouetteNumericIds.has(b.numericId)
+      ) {
+        continue;
+      }
+      renderedSilhouetteNumericIds.add(b.numericId);
       const bob = Math.sin(t * 2.2 + b.numericId * 0.7) * 0.06;
 
       dummy.position.set(b.x, b.y + 0.82, b.z);
@@ -490,8 +622,16 @@ function FarLanternSilhouettes({ nearSessionIds }: { nearSessionIds: Set<string>
     const peerKeys = Object.keys(st.peers);
     for (let i = 0; i < peerKeys.length && idx < MAX_FAR_LANTERNS; i++) {
       const sid = peerKeys[i];
-      if (nearSessionIds.has(sid)) continue;
       const p = st.peers[sid];
+      if (!p) continue;
+      if (
+        (nearSessionIds.has(sid) && liveVisibleNearNumericIds.has(p.numericId)) ||
+        liveVisibleNearNumericIds.has(p.numericId) ||
+        renderedSilhouetteNumericIds.has(p.numericId)
+      ) {
+        continue;
+      }
+      renderedSilhouetteNumericIds.add(p.numericId);
       const bob = Math.sin(t * 2.2 + p.numericId * 0.7) * 0.06;
 
       dummy.position.set(p.x, p.y + 0.82, p.z);
@@ -549,17 +689,24 @@ export function PeerCrowdRenderer() {
         return;
       }
 
+      const farSet = new Set<number>();
+      for (let i = 0; i < st.farBeacons.length; i++) {
+        farSet.add(st.farBeacons[i].numericId);
+      }
+      const nowPerf = performance.now();
+
+      // Prioritize selected/nearby peers first, then sort by distance squared
+      const preferredId = st.selectedPeerSessionId || st.nearbyPeer?.sessionId || '';
       allPeers.sort((a, b) => {
+        if (a.sessionId === preferredId && b.sessionId !== preferredId) return -1;
+        if (b.sessionId === preferredId && a.sessionId !== preferredId) return 1;
         const da = (a.x - lt.x) * (a.x - lt.x) + (a.z - lt.z) * (a.z - lt.z);
         const db = (b.x - lt.x) * (b.x - lt.x) + (b.z - lt.z) * (b.z - lt.z);
         return da - db;
       });
 
       const selected: PeerAppearanceSlot[] = allPeers
-        .filter((p) => {
-          const dSq = (p.x - lt.x) * (p.x - lt.x) + (p.z - lt.z) * (p.z - lt.z);
-          return dSq <= 95 * 95;
-        })
+        .filter((p) => isPeerInActiveNearAoi(p, lt.x, lt.z, nowPerf, farSet))
         .slice(0, maxNearPeers)
         .map((p) => ({
           sessionId: p.sessionId,

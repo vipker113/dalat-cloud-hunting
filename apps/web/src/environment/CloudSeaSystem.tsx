@@ -16,6 +16,7 @@ const GREENHOUSE_CLUSTERS: ReadonlyArray<{
   rz: number;
   weight: number;
 }> = [
+  // Eastern Basin (below Cầu Gỗ Săn Mây & Đồi Chè Cầu Đất)
   { cx: 175, cz: 35, rx: 44, rz: 36, weight: 0.95 },
   { cx: 235, cz: 92, rx: 58, rz: 48, weight: 1.0 },
   { cx: 295, cz: 55, rx: 52, rz: 44, weight: 0.92 },
@@ -25,6 +26,15 @@ const GREENHOUSE_CLUSTERS: ReadonlyArray<{
   { cx: 342, cz: 196, rx: 44, rz: 36, weight: 0.82 },
   { cx: 162, cz: -12, rx: 36, rz: 30, weight: 0.76 },
   { cx: 268, cz: -18, rx: 42, rz: 32, weight: 0.8 },
+  // Southern / SE Thái Phiên Greenhouse Vista (directly below Đài Ngắm Thung Lũng Đèn [17.2, 112, 128.5])
+  { cx: 18, cz: 205, rx: 48, rz: 42, weight: 0.96 },
+  { cx: 78, cz: 198, rx: 58, rz: 46, weight: 1.0 },
+  { cx: 142, cz: 214, rx: 62, rz: 48, weight: 1.0 },
+  { cx: 42, cz: 268, rx: 56, rz: 48, weight: 0.98 },
+  { cx: 118, cz: 278, rx: 64, rz: 52, weight: 1.0 },
+  { cx: 192, cz: 286, rx: 60, rz: 50, weight: 0.98 },
+  { cx: 92, cz: 332, rx: 58, rz: 44, weight: 0.92 },
+  { cx: 172, cz: 336, rx: 56, rz: 44, weight: 0.9 },
 ];
 
 function clamp01(v: number): number {
@@ -197,8 +207,8 @@ function createVolumetricCloudTextures(): {
         (1 - smoothstepJS(80, 118, h)) * (1 - nearOverlook * 0.92) * (1 - nearVeranda * 0.95);
 
       let irradiance = 0;
-      if (wx >= 105 && wx <= 420 && wz >= -85 && wz <= 270) {
-        const valleyMask = 1 - smoothstepJS(42, 78, groundH);
+      if (wx >= -48 && wx <= 420 && wz >= -85 && wz <= 368) {
+        const valleyMask = 1 - smoothstepJS(48, 84, groundH);
         let clusterSum = 0;
         for (let c = 0; c < GREENHOUSE_CLUSTERS.length; c++) {
           const cl = GREENHOUSE_CLUSTERS[c];
@@ -207,7 +217,7 @@ function createVolumetricCloudTextures(): {
           clusterSum += cl.weight * Math.exp(-(dx * dx + dz * dz));
         }
         const rowMod = 0.8 + 0.2 * Math.sin(wx * 0.2 + wz * 0.08) * Math.cos(wz * 0.18 - wx * 0.05);
-        irradiance = clamp01(clusterSum * 0.86 * valleyMask * rowMod);
+        irradiance = clamp01(clusterSum * 0.88 * valleyMask * rowMod);
       }
 
       terrainHalf[idx] = toHalf(h);
@@ -340,10 +350,28 @@ export const VOLUMETRIC_CLOUD_COMMON_GLSL = /* glsl */ `
     float terrainH = tInfo.x;
     float orographic = tInfo.y;
     float valleyOpen = tInfo.z;
+    float ghIrradiance = tInfo.w;
 
-    // Depress cloud tops near ridges & walkable decks so hilltops/verandas stay crisp above plush valley clouds!
-    float localRoof = roofY - (1.0 - valleyOpen) * 24.0 + orographic * 7.5;
-    float slabSpan = max(16.0, localRoof - bottomY);
+    // Convective thermal clearing over Thung Lũng Đèn (Southern + Eastern/SE Thái Phiên greenhouse vista)
+    // During pre-dawn/night (uGreenhouseIntensity > 0.15), warm 2,700K glasshouses part the cloud roof into
+    // gossamer low-lying valley mist so the golden greenhouse amphitheater shines clearly from Đài Ngắm Đèn,
+    // while sunrise (uGreenhouseIntensity -> 0) restores the full 108m sea of clouds!
+    float southVista =
+      smoothstep(-48.0, 10.0, p.x) * (1.0 - smoothstep(245.0, 310.0, p.x)) *
+      smoothstep(125.0, 165.0, p.z) * (1.0 - smoothstep(345.0, 395.0, p.z));
+    float eastBasinVista =
+      smoothstep(125.0, 185.0, p.x) * (1.0 - smoothstep(355.0, 410.0, p.x)) *
+      smoothstep(-52.0, -8.0, p.z) * (1.0 - smoothstep(235.0, 290.0, p.z));
+    float valleyVistaWindow = max(southVista, eastBasinVista);
+    float ghNightDome = valleyVistaWindow * smoothstep(0.15, 0.72, uGreenhouseIntensity);
+
+    // Depress cloud tops near ridges & walkable decks during standard cloud-sea hours,
+    // while allowing high-elevation mist/boil states (uCloudTopY > 122m) to drift softly across Café Mơ Sương!
+    float highMistRise = smoothstep(122.0, 140.0, uCloudTopY);
+    float ridgeDepress = mix(24.0, 8.0, highMistRise);
+    float localRoof = roofY - (1.0 - valleyOpen) * ridgeDepress + orographic * 7.5;
+    localRoof = mix(localRoof, max(terrainH + 14.0, bottomY + 6.0), ghNightDome * 0.90);
+    float slabSpan = max(12.0, localRoof - bottomY);
     float hFrac = clamp((p.y - bottomY) / slabSpan, 0.0, 1.0);
     outHeightFrac = hFrac;
 
@@ -373,6 +401,14 @@ export const VOLUMETRIC_CLOUD_COMMON_GLSL = /* glsl */ `
 
     float coverage = clamp(domeCrownH * (0.72 + 0.38 * uCloudDensity) + (uCloudDensity - 0.75) * 0.18, 0.0, 1.0);
 
+    float ghThermalClear = clamp(
+      valleyVistaWindow * (0.28 + 0.68 * uGreenhouseIntensity) +
+        ghIrradiance * (0.24 + 0.70 * uGreenhouseIntensity),
+      0.0,
+      0.96
+    );
+    coverage *= (1.0 - ghThermalClear * 0.90);
+
     float baseFade = smoothstep(0.0, 0.12, hFrac);
     float turretTop = clamp(0.18 + coverage * 0.80, 0.16, 0.99);
     float topRounding = 1.0 - smoothstep(turretTop * 0.58, turretTop, hFrac);
@@ -395,7 +431,10 @@ export const VOLUMETRIC_CLOUD_COMMON_GLSL = /* glsl */ `
 
     float valleyBed = (1.0 - smoothstep(0.08, 0.28, hFrac)) * valleyOpen * smoothstep(0.18, 0.70, uCloudDensity) * 0.68;
 
+    // Keep hilltop mist airy & breathable when highMistRise wraps upper verandas (135m+)
+    float hilltopBreathable = mix(1.0, mix(0.32, 1.0, valleyOpen), highMistRise);
     float finalDensity = (sculpted * 0.122 + valleyBed * 0.066) * shoreMist * (0.56 + 0.62 * uCloudDensity);
+    finalDensity *= (1.0 - ghThermalClear * 0.90) * hilltopBreathable;
     return finalDensity;
   }
 
@@ -404,7 +443,9 @@ export const VOLUMETRIC_CLOUD_COMMON_GLSL = /* glsl */ `
     if (p.y >= roofY || p.y <= bottomY) return 0.0;
     vec2 uv = clamp((p.xz + 450.0) / 900.0, 0.002, 0.998);
     vec4 tTex = texture2D(uTerrainMap, uv);
-    float localRoof = roofY - (1.0 - tTex.b) * 24.0 + tTex.g * 7.5;
+    float highMistRise = smoothstep(122.0, 140.0, uCloudTopY);
+    float ridgeDepress = mix(24.0, 8.0, highMistRise);
+    float localRoof = roofY - (1.0 - tTex.b) * ridgeDepress + tTex.g * 7.5;
     if (p.y <= tTex.r + 0.65 || p.y >= localRoof) return 0.0;
     float hFrac = clamp((p.y - bottomY) / max(16.0, localRoof - bottomY), 0.0, 1.0);
     float windSpeed = 2.4 + uWindStrength * 3.4;
@@ -414,7 +455,8 @@ export const VOLUMETRIC_CLOUD_COMMON_GLSL = /* glsl */ `
     vec4 billowSample = texture2D(uCloudAtlas, uvBillow);
     float rawCrown = macroSample.r * 0.42 + billowSample.r * 0.42 + billowSample.g * 0.16;
     float cov = clamp(smoothstep(0.22, 0.78, rawCrown) * (0.72 + 0.38 * uCloudDensity), 0.0, 1.0);
-    return cov * (1.0 - smoothstep(0.55, 0.98, hFrac)) * 0.095 * uCloudDensity;
+    float ghClear = clamp(tTex.a * (0.20 + 0.55 * uGreenhouseIntensity), 0.0, 0.78);
+    return cov * (1.0 - ghClear) * (1.0 - smoothstep(0.55, 0.98, hFrac)) * 0.095 * uCloudDensity;
   }
 
   /**
@@ -487,10 +529,18 @@ export const VOLUMETRIC_CLOUD_COMMON_GLSL = /* glsl */ `
       float hFrac = 0.5;
       float sigma = evalCloudDensity3D(p, roofY, bottomY, tInfo, detailLod, hFrac);
 
-      // Keep a crisp personal visibility clearing around the camera lens & smoothly feather solid contacts
-      float nearClear = smoothstep(8.0, 24.0, camDist);
+      // Keep a crisp 3m personal visibility bubble around camera & smoothly feather out to 20m
+      float nearClear = smoothstep(3.0, 20.0, camDist);
       float solidFeather = hasSceneHit > 0.5 ? smoothstep(0.05, 3.2, sceneHitDist - camDist) : 1.0;
       sigma *= nearClear * solidFeather;
+
+      // Subtle warm 2,700K ground-mist veil softly hovering above lit greenhouse valleys (never blinding foreground!)
+      if (uGreenhouseIntensity > 0.01 && tInfo.w > 0.02) {
+        float lowMistBand = exp(-max(0.0, p.y - tInfo.x - 1.5) * 0.095);
+        float valleyNearClear = smoothstep(14.0, 48.0, camDist);
+        float haloSigma = tInfo.w * uGreenhouseIntensity * lowMistBand * 0.0018 * valleyNearClear * solidFeather;
+        sigma = max(sigma, haloSigma);
+      }
 
       if (sigma > 0.0004) {
         vec3 pSun1 = p + sunDir * 48.0;
@@ -514,8 +564,9 @@ export const VOLUMETRIC_CLOUD_COMMON_GLSL = /* glsl */ `
         vec3 stepScattering = ambient + directSun;
 
         if (uGreenhouseIntensity > 0.002 && tInfo.w > 0.003) {
-          float underTransmit = (1.0 - smoothstep(0.05, 0.82, hFrac)) * 1.45 + 0.25;
-          stepScattering += vec3(1.0, 0.66, 0.22) * (tInfo.w * uGreenhouseIntensity * underTransmit * 2.35);
+          float groundProx = exp(-max(0.0, p.y - tInfo.x) * 0.042);
+          float underTransmit = ((1.0 - smoothstep(0.05, 0.78, hFrac)) * 0.85 + 0.15) * groundProx;
+          stepScattering += vec3(1.0, 0.62, 0.20) * (tInfo.w * uGreenhouseIntensity * underTransmit * 0.92);
         }
 
         float stepTrans = exp(-sigma * stepLen);
@@ -564,8 +615,9 @@ export const VOLUMETRIC_CLOUD_PASS_FRAG = /* glsl */ `
     vec3 viewRay = normalize(viewFar.xyz / max(1e-6, viewFar.w));
     vec3 rayDir = normalize((uCamWorldMatrix * vec4(viewRay, 0.0)).xyz);
 
-    // Realistic Da Lat cloud-sea inversion lid (keeps veranda at 135.3m & upper overlooks crystal-clear!)
-    float roofY = min(uCloudTopY + 18.0, 131.5);
+    // Uncapped Da Lat cloud-sea ceiling: sits below hilltops during golden cloud-sea hours,
+    // and rises organically during morning_mist_boil (136m) & deep_evening_fog (142m)!
+    float roofY = uCloudTopY + 18.0;
     float bottomY = min(uCloudBottomY - 10.0, roofY - 24.0);
 
     // Analytical ray-slab [bottomY, roofY] intersection
@@ -645,7 +697,7 @@ const MOBILE_CLOUD_VERT = /* glsl */ `
   varying float vEffectiveRoofY;
 
   void main() {
-    float roofY = min(min(uCloudTopY + 12.0, 118.0), cameraPosition.y - 4.0);
+    float roofY = min(uCloudTopY + 12.0, cameraPosition.y - 3.5);
     vEffectiveRoofY = roofY;
 
     vec4 worldPos = modelMatrix * vec4(position, 1.0);

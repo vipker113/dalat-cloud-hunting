@@ -6,7 +6,7 @@ import type { PolaroidEntry, WeatherStateId, WindChimeNote } from '@dalat/protoc
 const DATA_FILE_PATH = fileURLToPath(new URL('../data/world_memory.json', import.meta.url));
 const MAX_POLAROIDS = 24;
 const MAX_WIND_CHIMES = 30;
-const MAX_IMAGE_DATA_LEN = 450_000;
+export const MAX_IMAGE_DATA_LEN = 650_000;
 
 const BLOCKED_WORDS_RE =
   /\b(fuck|shit|bitch|asshole|dick|cunt|nigger|faggot|đụ|địt|lồn|cặc|đéo|vãi lồn|đĩ|chó đẻ)\b/gi;
@@ -205,6 +205,7 @@ class WorldPersistenceStore {
   private polaroids: PolaroidEntry[] = [];
   private windChimeNotes: WindChimeNote[] = [];
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private dirty = false;
   private readonly supabaseUrl = process.env.SUPABASE_URL?.trim() || '';
   private readonly supabaseKey = process.env.SUPABASE_ANON_KEY?.trim() || '';
 
@@ -245,11 +246,13 @@ class WorldPersistenceStore {
       seeded = true;
     }
     if (seeded) {
+      this.dirty = true;
       this.flushToDiskNow();
     }
   }
 
   private scheduleDiskFlush(): void {
+    this.dirty = true;
     if (this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
@@ -258,6 +261,11 @@ class WorldPersistenceStore {
   }
 
   public flushToDiskNow(): void {
+    if (!this.dirty) return;
+    if (this.saveTimer) {
+      clearTimeout(this.saveTimer);
+      this.saveTimer = null;
+    }
     try {
       const dir = dirname(DATA_FILE_PATH);
       if (!existsSync(dir)) {
@@ -271,6 +279,7 @@ class WorldPersistenceStore {
       const tmpPath = `${DATA_FILE_PATH}.tmp`;
       writeFileSync(tmpPath, JSON.stringify(payload, null, 2), 'utf8');
       renameSync(tmpPath, DATA_FILE_PATH);
+      this.dirty = false;
     } catch {
       // Keep in-memory state intact if disk is read-only
     }
@@ -408,3 +417,4 @@ class WorldPersistenceStore {
 }
 
 export const worldPersistence = new WorldPersistenceStore();
+

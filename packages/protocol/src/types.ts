@@ -283,6 +283,43 @@ export interface AcousticJamNote {
   timestamp: number;
 }
 
+export interface PolaroidPinAck {
+  ok: boolean;
+  polaroidId?: string;
+  reason?: string;
+}
+
+export interface ServerPoseCorrection {
+  x: number;
+  y: number;
+  z: number;
+  yaw?: number;
+  reason?: string;
+}
+
+export const ROOM_CODE_REGEX = /^[A-Z0-9-]{3,14}$/;
+
+/**
+ * Canonicalizes user-entered or URL room codes across client and server:
+ * - Uppercases & strips invalid characters (max 14 chars).
+ * - Normalizes `MAY-001` / `MAY-1` -> `MAY-01` so zero-padded variants never spawn duplicate immortal shards.
+ */
+export function normalizeRoomCode(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const cleaned = raw
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9-]/g, '')
+    .slice(0, 14);
+  if (!cleaned) return '';
+  const mayMatch = cleaned.match(/^MAY-0*(\d+)$/);
+  if (mayMatch) {
+    const idx = Math.max(1, Math.min(999, Number.parseInt(mayMatch[1], 10) || 1));
+    return `MAY-${String(idx).padStart(2, '0')}`;
+  }
+  return cleaned;
+}
+
 export const WORLD_CONSTANTS = {
   HALF_SIZE: 450, // 900m x 900m [-450, +450]
   BASE_ASL_METERS: 1450, // Y=0 -> 1,450m ASL
@@ -293,7 +330,7 @@ export const WORLD_CONSTANTS = {
   NET_TICK_HZ: 12,
   INTERPOLATION_DELAY_MS: 130,
   PROXIMITY_CHAT_RADIUS: 35,
-  MAX_WALK_SPEED: 4.1,
+  MAX_WALK_SPEED: 2.5,
   MAX_RUN_SPEED: 7.4,
 } as const;
 

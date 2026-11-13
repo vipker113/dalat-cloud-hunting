@@ -25,19 +25,24 @@ import {
   type NearPeerTransform,
   NECKWEAR_CATALOG,
   type NeckwearId,
+  normalizeRoomCode,
   parseBenchSeatId,
   type PlayerOutfit,
   type PolaroidEntry,
+  type PolaroidPinAck,
   resolveBenchSeatTransform,
   resolveEffectiveBagStyle,
   resolveEffectiveEyewear,
   resolveEffectiveGender,
   resolveEffectiveNeckwear,
+  sampleGroundHeight,
   sampleWalkableHeight,
+  type ServerPoseCorrection,
   SHARED_BENCHES,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
-import { sanitizeSocialText, worldPersistence } from './persistence';
+import { AmbientHikerController, type AmbientHikerRuntime } from './ambientHikers';
+import { MAX_IMAGE_DATA_LEN, sanitizeSocialText, worldPersistence } from './persistence';
 import { CloudRoomState, PlayerSchema, type CloudRoomMetadata } from './schema';
 
 const POETIC_CHANNEL_NAMES = [
@@ -83,6 +88,8 @@ const JAM_BROADCAST_RADIUS = 45;
 
 interface HumanEntityTransform {
   sessionId: string;
+  tabId: string;
+  leaveSecret: string;
   numericId: number;
   x: number;
   y: number;
@@ -95,6 +102,8 @@ interface HumanEntityTransform {
   grounded: boolean;
   warmBuff: boolean;
   hasReceivedMove: boolean;
+  hydratedWorldInit: boolean;
+  clampStreak: number;
   lastSeq: number;
   lastMoveAtMs: number;
   burstSlackMeters: number;
@@ -115,14 +124,7 @@ function allocateChannelIdentity(requestedCode?: string): {
   channelName: string;
   shardIndex: number;
 } {
-  const cleaned =
-    typeof requestedCode === 'string'
-      ? requestedCode
-          .trim()
-          .toUpperCase()
-          .replace(/[^A-Z0-9-]/g, '')
-          .slice(0, 10)
-      : '';
+  const cleaned = normalizeRoomCode(requestedCode);
 
   const mayMatch = cleaned.match(/^MAY-0*(\d+)$/);
   if (mayMatch) {
@@ -146,7 +148,7 @@ function allocateChannelIdentity(requestedCode?: string): {
   if (cleaned.length >= 3) {
     return {
       roomCode: cleaned,
-      channelName: `${title} (${cleaned})`,
+      channelName: title,
       shardIndex: idx,
     };
   }
@@ -223,6 +225,9 @@ function isNearAnyLandmark(x: number, z: number): boolean {
       return true;
     }
   }
+  // Allow full Cầu Gỗ Săn Mây bridge ramp/deck & Tiệm Cà Phê Mơ Sương veranda
+  if (x >= 44 && x <= 100 && Math.abs(z - -75) <= 9.0) return true;
+  if (x >= -56 && x <= -22 && z >= 18 && z <= 42) return true;
   return false;
 }
 
@@ -231,18 +236,158 @@ export class CloudHuntingRoom extends Room<{
   metadata: CloudRoomMetadata;
 }> {
   private nextNumericId = 1;
+  private nextBotNumericId = 60001;
   private serverTick = 0;
   private shardIndex = 1;
   public roomCode = 'MAY-01';
   public channelName = 'Sương Sớm Cầu Đất #1';
 
   private readonly humanEntities = new Map<string, HumanEntityTransform>();
+  private readonly pendingReconnections = new Map<
+    string,
+    ReturnType<CloudHuntingRoom['allowReconnection']>
+  >();
+  private ambientHikers!: AmbientHikerController;
+
+  public getHumanCount(): number {
+    return this.humanEntities.size;
+  }
+
+  /**
+   * Immediately evicts a prior session belonging to the same browser tab (on reload / tab close)
+   * ONLY when the caller proves ownership via the private per-tab `leaveSecret`.
+   */
+  public evictClientSession(
+    sessionId?: string,
+    tabId?: string,
+    leaveSecret?: string,
+    excludeSessionId?: string
+  ): {
+    matched: boolean;
+    authorized: boolean;
+    lastPose: { x: number; z: number; yaw: number } | null;
+  } {
+    const cleanSid = typeof sessionId === 'string' ? sessionId.trim() : '';
+    const cleanTabId = typeof tabId === 'string' ? tabId.trim().slice(0, 64) : '';
+    const cleanSecret = typeof leaveSecret === 'string' ? leaveSecret.trim().slice(0, 128) : '';
+    if (!cleanSid && !cleanTabId) {
+      return { matched: false, authorized: false, lastPose: null };
+    }
+
+    let lastPose: { x: number; z: number; yaw: number } | null = null;
+    const candidates: HumanEntityTransform[] = [];
+
+    for (const [sid, ent] of this.humanEntities) {
+      if (excludeSessionId && sid === excludeSessionId) continue;
+      if ((cleanSid && sid === cleanSid) || (cleanTabId && ent.tabId === cleanTabId)) {
+        candidates.push(ent);
+      }
+    }
+
+    if (candidates.length === 0) {
+      return { matched: false, authorized: cleanSecret.length >= 12, lastPose: null };
+    }
+
+    const toEvict: string[] = [];
+    for (const ent of candidates) {
+      if (cleanSecret && ent.leaveSecret && ent.leaveSecret === cleanSecret) {
+        lastPose = { x: ent.x, z: ent.z, yaw: ent.yaw };
+        toEvict.push(ent.sessionId);
+      }
+    }
+
+    if (toEvict.length === 0) {
+      return { matched: true, authorized: false, lastPose: null };
+    }
+
+    for (const sid of toEvict) {
+      this.releaseClientBench(sid);
+      this.humanEntities.delete(sid);
+      this.state.players.delete(sid);
+
+      const pending = this.pendingReconnections.get(sid);
+      if (pending) {
+        this.pendingReconnections.delete(sid);
+        try {
+          pending.reject(false);
+        } catch {
+          // ignore already-settled deferred
+        }
+      }
+
+      for (const activeClient of this.clients) {
+        if (activeClient.sessionId === sid) {
+          try {
+            activeClient.leave(4001, 'tab_reloaded');
+          } catch {
+            // ignore closing socket
+          }
+        }
+      }
+    }
+
+    this.syncAmbientBots();
+    return { matched: true, authorized: true, lastPose };
+  }
+
+  private syncAmbientBots(): void {
+    if (!this.ambientHikers || !this.state) return;
+    const { added, removed } = this.ambientHikers.reconcilePopulation(this.humanEntities.size);
+    for (const bot of removed) {
+      this.state.players.delete(bot.spec.sessionId);
+    }
+    for (const bot of added) {
+      this.upsertBotSchema(bot);
+    }
+  }
+
+  private upsertBotSchema(bot: AmbientHikerRuntime): void {
+    const ps = new PlayerSchema();
+    ps.numericId = bot.numericId;
+    ps.sessionId = bot.spec.sessionId;
+    ps.displayName = bot.spec.displayName;
+    ps.gender = getCoatGender(bot.spec.coatStyle);
+    ps.coatStyle = bot.spec.coatStyle;
+    ps.coatColor = bot.spec.coatColor;
+    ps.scarfColor = bot.spec.scarfColor;
+    ps.headwear = bot.spec.headwear;
+    ps.neckwear = bot.spec.neckwear;
+    ps.eyewear = bot.spec.eyewear;
+    ps.bagStyle = bot.spec.bagStyle;
+    ps.hairColor = bot.spec.hairColor;
+    ps.backpack = bot.spec.backpack;
+    ps.heldItem = bot.heldItem;
+    ps.emote = bot.emote;
+    ps.seatId = '';
+    ps.isBot = true;
+    ps.spawnX = bot.x;
+    ps.spawnY = bot.y;
+    ps.spawnZ = bot.z;
+    ps.spawnYaw = bot.yaw;
+    this.state.players.set(bot.spec.sessionId, ps);
+  }
+
+  private isNearAnyPlayer(x: number, z: number, excludeSessionId: string): boolean {
+    for (const [sid, other] of this.humanEntities) {
+      if (sid !== excludeSessionId && Math.hypot(x - other.x, z - other.z) <= 6.0) {
+        return true;
+      }
+    }
+    if (this.ambientHikers) {
+      for (const bot of this.ambientHikers.getAll()) {
+        if (bot.active && Math.hypot(x - bot.x, z - bot.z) <= 6.0) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
 
   private allocateNumericId(): number {
-    // Wrap safely in 1..65534
-    for (let guard = 0; guard < 65535; guard++) {
+    // Human numeric IDs stay strictly in 1..59999 so 60001+ bot IDs never collide
+    for (let guard = 0; guard < 59999; guard++) {
       const candidate = this.nextNumericId;
-      this.nextNumericId = this.nextNumericId >= 65534 ? 1 : this.nextNumericId + 1;
+      this.nextNumericId = this.nextNumericId >= 59999 ? 1 : this.nextNumericId + 1;
       let collision = false;
       for (const h of this.humanEntities.values()) {
         if (h.numericId === candidate) {
@@ -261,16 +406,24 @@ export class CloudHuntingRoom extends Room<{
     this.channelName = identity.channelName;
     this.shardIndex = identity.shardIndex;
 
+    const primaryMay01Exists = Array.from(activeCloudRooms.values()).some(
+      (r) => r !== this && r.roomCode === 'MAY-01'
+    );
     this.maxClients = WORLD_CONSTANTS.HARD_ROOM_CAP;
-    this.autoDispose = options?.keepAlive === true || this.shardIndex === 1 ? false : true;
+    this.autoDispose =
+      options?.keepAlive === true || (this.roomCode === 'MAY-01' && !primaryMay01Exists)
+        ? false
+        : true;
     this.patchRate = 100; // 10 Hz low-frequency Schema metadata patches
-    this.seatReservationTimeout = 20;
+    this.seatReservationTimeout = 8;
     this.maxMessagesPerSecond = 90;
 
     const state = new CloudRoomState();
     state.roomCode = this.roomCode;
     state.channelName = this.channelName;
     this.state = state;
+
+    this.ambientHikers = new AmbientHikerController(() => this.nextBotNumericId++);
 
     await this.setMatchmaking({
       maxClients: WORLD_CONSTANTS.HARD_ROOM_CAP,
@@ -312,10 +465,79 @@ export class CloudHuntingRoom extends Room<{
     // 2b. Explicit client hydration request (guaranteed after client binds room.onMessage handlers)
     this.onMessage('req_world_init', (client) => {
       const ent = this.humanEntities.get(client.sessionId);
-      if (ent) {
+      if (ent && !ent.hydratedWorldInit) {
+        ent.hydratedWorldInit = true;
         this.sendWorldHydration(client, ent.numericId);
       }
     });
+
+    // 2c. Authoritative fast-travel / companion teleport (releases bench & reconciles cooldown rejections)
+    this.onMessage(
+      'teleport',
+      (
+        client,
+        payload: { x?: number; y?: number; z?: number; yaw?: number; qaOverride?: boolean }
+      ) => {
+        const ent = this.humanEntities.get(client.sessionId);
+        const ps = this.state.players.get(client.sessionId);
+        if (!ent || !ps) return;
+
+        // Always release any occupied bench immediately when fast-traveling
+        this.releaseClientBench(client.sessionId);
+
+        const rawX = typeof payload?.x === 'number' ? payload.x : NaN;
+        const rawZ = typeof payload?.z === 'number' ? payload.z : NaN;
+        if (!Number.isFinite(rawX) || !Number.isFinite(rawZ)) return;
+
+        const nx = clamp(rawX, -445, 445);
+        const nz = clamp(rawZ, -445, 445);
+        const wallNow = Date.now();
+        const allowQaOverride =
+          payload?.qaOverride === true && process.env.NODE_ENV !== 'production';
+        const validTarget =
+          allowQaOverride ||
+          isNearAnyLandmark(nx, nz) ||
+          this.isNearAnyPlayer(nx, nz, client.sessionId);
+
+        if (validTarget && (allowQaOverride || wallNow - ent.lastTeleportAtMs >= 300)) {
+          const walkY = sampleWalkableHeight(nx, nz);
+          const groundY = sampleGroundHeight(nx, nz);
+          const requestedY =
+            allowQaOverride && typeof payload?.y === 'number' && Number.isFinite(payload.y)
+              ? clamp(payload.y, groundY - 0.5, walkY + 4.0)
+              : walkY;
+          ent.x = nx;
+          ent.y = requestedY;
+          ent.z = nz;
+          if (typeof payload?.yaw === 'number' && Number.isFinite(payload.yaw)) {
+            ent.yaw = payload.yaw;
+          }
+          ent.vx = 0;
+          ent.vz = 0;
+          ent.moving = false;
+          ent.running = false;
+          if (!allowQaOverride) {
+            ent.lastTeleportAtMs = wallNow;
+          }
+          ent.burstSlackMeters = 6.5;
+          ent.clampStreak = 0;
+
+          ps.spawnX = ent.x;
+          ps.spawnY = ent.y;
+          ps.spawnZ = ent.z;
+          ps.spawnYaw = ent.yaw;
+        } else {
+          const correction: ServerPoseCorrection = {
+            x: ent.x,
+            y: ent.y,
+            z: ent.z,
+            yaw: ent.yaw,
+            reason: validTarget ? 'teleport_cooldown' : 'invalid_target',
+          };
+          client.send('pose_correct', correction);
+        }
+      }
+    );
 
     // 3. Profile & highland coat/scarf customization
     this.onMessage(
@@ -433,6 +655,53 @@ export class CloudHuntingRoom extends Room<{
           return;
         }
         ent.lastSocialAtMs = now;
+
+        // Handle ambient highland hiker social reactions (greeting, clinking warm cups, cheering sunrise)
+        if (targetId.startsWith('bot-') && this.ambientHikers) {
+          const botKind = kind === 'cheers' ? 'cheers' : kind === 'cheer' ? 'cheer' : 'greet';
+          const reaction = this.ambientHikers.reactToSocial(
+            targetId,
+            ent.x,
+            ent.z,
+            ps.displayName,
+            botKind
+          );
+          if (reaction) {
+            const { bot, emote, heldItem, replyText } = reaction;
+            if (Math.hypot(bot.x - ent.x, bot.z - ent.z) <= 18.5) {
+              const botPs = this.state.players.get(targetId);
+              if (botPs) {
+                botPs.emote = emote;
+                botPs.heldItem = heldItem;
+              }
+              ent.warmBuff = true;
+              const midX = (ent.x + bot.x) * 0.5;
+              const midY = (ent.y + bot.y) * 0.5 + 1.48;
+              const midZ = (ent.z + bot.z) * 0.5;
+              client.send('social_event', {
+                fromId: client.sessionId,
+                fromName: ps.displayName,
+                targetId,
+                targetName: bot.spec.displayName,
+                kind,
+                x: midX,
+                y: midY,
+                z: midZ,
+              });
+              client.send('chat_bubble', {
+                id: `msg-${now}-${Math.random().toString(36).slice(2, 7)}`,
+                senderId: targetId,
+                senderName: bot.spec.displayName,
+                text: replyText,
+                x: bot.x,
+                y: bot.y,
+                z: bot.z,
+                timestamp: now,
+              } satisfies ChatBubbleMessage);
+            }
+          }
+          return;
+        }
 
         // Check if target is a human peer within 18m
         const targetHuman = this.humanEntities.get(targetId);
@@ -604,7 +873,7 @@ export class CloudHuntingRoom extends Room<{
       }
     );
 
-    // 9. Durable Polaroid Wall pin & like
+    // 9. Durable Polaroid Wall pin & like (with explicit polaroid_pin_ack so UI never falsely toasts success)
     this.onMessage(
       'polaroid_pin',
       (client, payload: Partial<Omit<PolaroidEntry, 'id' | 'likes' | 'createdAt'>>) => {
@@ -613,12 +882,37 @@ export class CloudHuntingRoom extends Room<{
         if (!ent || !ps) return;
 
         const now = Date.now();
-        if (now - ent.lastPolaroidAtMs < 2500) return;
-        ent.lastPolaroidAtMs = now;
+        if (now - ent.lastPolaroidAtMs < 2500) {
+          const ack: PolaroidPinAck = {
+            ok: false,
+            reason: 'Bạn vừa ghim ảnh, vui lòng đợi vài giây nhé.',
+          };
+          client.send('polaroid_pin_ack', ack);
+          return;
+        }
 
+        const rawImage = typeof payload?.imageDataUrl === 'string' ? payload.imageDataUrl.trim() : '';
+        if (!rawImage.startsWith('data:image/') || rawImage.length > MAX_IMAGE_DATA_LEN) {
+          const ack: PolaroidPinAck = {
+            ok: false,
+            reason: 'Ảnh quá lớn hoặc không hợp lệ để ghim lên bảng chung.',
+          };
+          client.send('polaroid_pin_ack', ack);
+          return;
+        }
+
+        ent.lastPolaroidAtMs = now;
         const created = worldPersistence.addPolaroid(payload || {}, ps.displayName);
         if (created) {
           CloudHuntingRoom.broadcastAcrossShards('polaroid_added', created);
+          const ack: PolaroidPinAck = { ok: true, polaroidId: created.id };
+          client.send('polaroid_pin_ack', ack);
+        } else {
+          const ack: PolaroidPinAck = {
+            ok: false,
+            reason: 'Không thể lưu tấm ảnh lên bảng lúc này.',
+          };
+          client.send('polaroid_pin_ack', ack);
         }
       }
     );
@@ -720,10 +1014,15 @@ export class CloudHuntingRoom extends Room<{
       const stepBudget = dtSec * maxAllowedSpeed + ent.burstSlackMeters;
 
       if (horizDist > stepBudget) {
-        // Allow legitimate Landmark Fast-Travel with a 200ms cooldown
-        if (isNearAnyLandmark(nx, nz) && wallNow - ent.lastTeleportAtMs > 200) {
+        // Allow legitimate Landmark Fast-Travel or Companion Friend-Teleport with a 200ms cooldown
+        if (
+          (isNearAnyLandmark(nx, nz) || this.isNearAnyPlayer(nx, nz, client.sessionId)) &&
+          wallNow - ent.lastTeleportAtMs > 200
+        ) {
+          this.releaseClientBench(client.sessionId);
           ent.lastTeleportAtMs = wallNow;
-          ent.burstSlackMeters = 4.5;
+          ent.burstSlackMeters = 5.0;
+          ent.clampStreak = 0;
           const ps = this.state.players.get(client.sessionId);
           if (ps) {
             ps.spawnX = nx;
@@ -732,14 +1031,32 @@ export class CloudHuntingRoom extends Room<{
             ps.spawnYaw = pkt.yaw;
           }
         } else {
-          // Clamp horizontal displacement to leaky-bucket budget
+          // Clamp horizontal displacement to leaky-bucket budget & reconcile persistent drift
+          const cutMeters = horizDist - stepBudget;
           const scale = stepBudget / (horizDist || 1);
           nx = ent.x + dx * scale;
           nz = ent.z + dz * scale;
           ent.burstSlackMeters = 0;
+          if (cutMeters > 8.5) {
+            ent.clampStreak += 1;
+            if (ent.clampStreak >= 5) {
+              ent.clampStreak = 0;
+              const groundClampY = sampleGroundHeight(nx, nz);
+              const walkClampY = sampleWalkableHeight(nx, nz);
+              const correction: ServerPoseCorrection = {
+                x: nx,
+                y: clamp(pkt.y, groundClampY - 0.5, walkClampY + 6.5),
+                z: nz,
+                yaw: pkt.yaw,
+                reason: 'speed_clamp',
+              };
+              client.send('pose_correct', correction);
+            }
+          }
         }
       } else {
         ent.burstSlackMeters = Math.min(4.5, stepBudget - horizDist);
+        ent.clampStreak = 0;
       }
     }
 
@@ -773,14 +1090,13 @@ export class CloudHuntingRoom extends Room<{
     ent.lastMoveAtMs = now;
     ent.hasReceivedMove = true;
 
-    // 5. Auto-release bench seat if player walks away
+    // 5. Auto-release bench seat if player walks or fast-travels away (even if stationary on arrival)
     const ps = this.state.players.get(client.sessionId);
     if (ps && ps.seatId) {
       const seatTransform = resolveBenchSeatTransform(ps.seatId);
       if (
         !seatTransform ||
-        (pkt.moving &&
-          Math.hypot(nx - seatTransform.position[0], nz - seatTransform.position[2]) > 0.85)
+        Math.hypot(nx - seatTransform.position[0], nz - seatTransform.position[2]) > 1.05
       ) {
         this.releaseClientBench(client.sessionId);
       }
@@ -790,6 +1106,8 @@ export class CloudHuntingRoom extends Room<{
   onJoin(
     client: Client,
     options?: {
+      tabId?: string;
+      leaveSecret?: string;
       displayName?: string;
       outfit?: Partial<PlayerOutfit>;
       heldItem?: HeldItemId;
@@ -797,6 +1115,16 @@ export class CloudHuntingRoom extends Room<{
       z?: number;
     }
   ): void {
+    const cleanTabId =
+      typeof options?.tabId === 'string' ? options.tabId.trim().slice(0, 64) : '';
+    const cleanSecret =
+      typeof options?.leaveSecret === 'string' && options.leaveSecret.trim().length >= 12
+        ? options.leaveSecret.trim().slice(0, 128)
+        : crypto.randomUUID();
+    if (cleanTabId) {
+      this.evictClientSession(undefined, cleanTabId, cleanSecret, client.sessionId);
+    }
+
     const numericId = this.allocateNumericId();
     const defaultSpawn = LANDMARKS['quan-mo-suong'].position;
     // Slight ring jitter around Mơ Sương courtyard so simultaneous joiners never stack identically
@@ -862,6 +1190,8 @@ export class CloudHuntingRoom extends Room<{
 
     this.humanEntities.set(client.sessionId, {
       sessionId: client.sessionId,
+      tabId: cleanTabId,
+      leaveSecret: cleanSecret,
       numericId,
       x: rawX,
       y: spawnY,
@@ -874,6 +1204,8 @@ export class CloudHuntingRoom extends Room<{
       grounded: true,
       warmBuff: true,
       hasReceivedMove: false,
+      hydratedWorldInit: false,
+      clampStreak: 0,
       lastSeq: 0,
       lastMoveAtMs: performance.now(),
       burstSlackMeters: 4.5,
@@ -886,11 +1218,16 @@ export class CloudHuntingRoom extends Room<{
       likedPolaroids: new Set<string>(),
     });
 
+    this.syncAmbientBots();
+
+    // Fallback hydration ONLY if client did not already pull via `req_world_init` (prevents 2x world_init!)
     setTimeout(() => {
-      if (this.humanEntities.has(client.sessionId)) {
+      const ent = this.humanEntities.get(client.sessionId);
+      if (ent && !ent.hydratedWorldInit) {
+        ent.hydratedWorldInit = true;
         this.sendWorldHydration(client, numericId);
       }
-    }, 50);
+    }, 350);
   }
 
   private sendWorldHydration(client: Client, numericId: number): void {
@@ -906,7 +1243,7 @@ export class CloudHuntingRoom extends Room<{
   }
 
   onDrop(client: Client): void {
-    // Free shared bench seat immediately while holding player's room slot for 45s reconnection
+    // Free shared bench seat immediately while holding player's room slot for 45s network-blip reconnection
     this.releaseClientBench(client.sessionId);
     const ent = this.humanEntities.get(client.sessionId);
     if (ent) {
@@ -915,20 +1252,36 @@ export class CloudHuntingRoom extends Room<{
       ent.vx = 0;
       ent.vz = 0;
     }
-    this.allowReconnection(client, 45).catch(() => {});
+    const deferred = this.allowReconnection(client, 45);
+    this.pendingReconnections.set(client.sessionId, deferred);
+    deferred
+      .then(() => {
+        this.pendingReconnections.delete(client.sessionId);
+      })
+      .catch(() => {
+        this.pendingReconnections.delete(client.sessionId);
+        this.releaseClientBench(client.sessionId);
+        this.humanEntities.delete(client.sessionId);
+        this.state.players.delete(client.sessionId);
+        this.syncAmbientBots();
+      });
   }
 
   onReconnect(client: Client): void {
+    this.pendingReconnections.delete(client.sessionId);
     const ent = this.humanEntities.get(client.sessionId);
     if (ent) {
+      ent.hydratedWorldInit = true;
       this.sendWorldHydration(client, ent.numericId);
     }
   }
 
   onLeave(client: Client): void {
+    this.pendingReconnections.delete(client.sessionId);
     this.releaseClientBench(client.sessionId);
     this.humanEntities.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
+    this.syncAmbientBots();
   }
 
   onDispose(): void {
@@ -937,14 +1290,28 @@ export class CloudHuntingRoom extends Room<{
     worldPersistence.flushToDiskNow();
   }
 
-  private tickSimulation(_dtMs: number): void {
+  private tickSimulation(dtMs: number): void {
     this.serverTick = (this.serverTick + 1) & 0xffff;
 
     if (this.clients.length === 0) {
       return;
     }
 
-    // Collect all active human peer transforms
+    // Step friendly ambient highland hikers when shard has < 6 human explorers
+    if (this.ambientHikers) {
+      this.syncAmbientBots();
+      const botChanges = this.ambientHikers.step(clamp(dtMs / 1000, 0.02, 0.25));
+      for (let i = 0; i < botChanges.length; i++) {
+        const ch = botChanges[i];
+        const botPs = this.state.players.get(ch.sessionId);
+        if (botPs) {
+          botPs.emote = ch.emote;
+          botPs.heldItem = ch.heldItem;
+        }
+      }
+    }
+
+    // Collect all active human & ambient hiker peer transforms
     const allEntities: NearPeerTransform[] = [];
     for (const h of this.humanEntities.values()) {
       allEntities.push({
@@ -960,6 +1327,13 @@ export class CloudHuntingRoom extends Room<{
         grounded: h.grounded,
         warmBuff: h.warmBuff,
       });
+    }
+    if (this.ambientHikers) {
+      for (const bot of this.ambientHikers.getAll()) {
+        if (bot.active) {
+          allEntities.push(this.ambientHikers.toNearTransform(bot));
+        }
+      }
     }
 
     // Standard Cozy Shard (<= 40 entities): single zero-copy broadcast frame to all clients

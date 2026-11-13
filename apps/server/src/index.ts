@@ -8,7 +8,7 @@ import {
   Server,
   type IRoomCache,
 } from '@colyseus/core';
-import { WORLD_CONSTANTS } from '@dalat/protocol';
+import { normalizeRoomCode, ROOM_CODE_REGEX, WORLD_CONSTANTS } from '@dalat/protocol';
 import { activeCloudRooms, CloudHuntingRoom } from './CloudHuntingRoom';
 import { worldPersistence } from './persistence';
 import type { CloudRoomMetadata } from './schema';
@@ -28,23 +28,28 @@ export interface RoomChannelSummary {
   hardCap: number;
 }
 
-const CORS_HEADERS: Record<string, string> = {
-  'Content-Type': 'application/json; charset=utf-8',
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-};
+function buildCorsHeaders(req?: Request): Record<string, string> {
+  const origin = req?.headers.get('origin');
+  return {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Access-Control-Allow-Origin': origin || '*',
+    ...(origin ? { 'Access-Control-Allow-Credentials': 'true', Vary: 'Origin' } : {}),
+    'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+  };
+}
 
-function jsonResponse(data: unknown, status = 200): Response {
+function jsonResponse(data: unknown, status = 200, req?: Request): Response {
   return new Response(JSON.stringify(data), {
     status,
-    headers: CORS_HEADERS,
+    headers: buildCorsHeaders(req),
   });
 }
 
 function toChannelSummary(cache: IRoomCache<CloudRoomMetadata>): RoomChannelSummary {
   const liveRoom = activeCloudRooms.get(cache.roomId);
-  const playerCount = liveRoom ? Math.max(cache.clients, liveRoom.clients.length) : cache.clients;
+  // Report verified connected human count so unconsumed HTTP seat reservations & bots never inflate shard occupancy
+  const playerCount = liveRoom ? liveRoom.getHumanCount() : cache.clients;
   return {
     roomId: cache.roomId,
     roomCode: cache.metadata?.roomCode || liveRoom?.roomCode || 'MAY-01',
@@ -54,6 +59,37 @@ function toChannelSummary(cache: IRoomCache<CloudRoomMetadata>): RoomChannelSumm
     softCap: cache.metadata?.softCap ?? WORLD_CONSTANTS.SOFT_ROOM_CAP,
     hardCap: cache.metadata?.hardCap ?? WORLD_CONSTANTS.HARD_ROOM_CAP,
   };
+}
+
+// Lightweight sliding-window rate limiter protecting HTTP matchmaking & leave-tab endpoints from abuse
+const rateBuckets = new Map<string, { count: number; resetAtMs: number }>();
+function checkRateLimit(
+  req: Request | undefined,
+  scope: string,
+  maxPerWindow: number,
+  windowMs = 10_000
+): boolean {
+  const ip =
+    req?.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ||
+    req?.headers.get('cf-connecting-ip')?.trim() ||
+    'local';
+  const key = `${scope}:${ip}`;
+  const now = Date.now();
+  const entry = rateBuckets.get(key);
+  if (!entry || now >= entry.resetAtMs) {
+    rateBuckets.set(key, { count: 1, resetAtMs: now + windowMs });
+    if (rateBuckets.size > 2048) {
+      for (const [k, v] of rateBuckets) {
+        if (now >= v.resetAtMs) rateBuckets.delete(k);
+      }
+    }
+    return true;
+  }
+  if (entry.count >= maxPerWindow) {
+    return false;
+  }
+  entry.count += 1;
+  return true;
 }
 
 async function listActiveRoomCaches(): Promise<Array<IRoomCache<CloudRoomMetadata>>> {
@@ -78,11 +114,15 @@ function runSerialized<T>(fn: () => Promise<T>): Promise<T> {
 interface ResolveRoomRequestBody {
   preferredRoomCode?: string;
   roomCodeOrId?: string;
+  roomCode?: string;
+  strictCustomCode?: boolean;
   reserveSeat?: boolean;
   clientOptions?: Record<string, unknown>;
 }
 
 async function resolveWarmestOrPreferredRoom(body: ResolveRoomRequestBody): Promise<{
+  ok?: boolean;
+  error?: string;
   roomId: string;
   roomCode: string;
   channelName: string;
@@ -93,9 +133,24 @@ async function resolveWarmestOrPreferredRoom(body: ResolveRoomRequestBody): Prom
   seatReservation?: Awaited<ReturnType<typeof matchMaker.reserveSeatFor>>;
 }> {
   return runSerialized(async () => {
+    // Evict any lingering ghost session from the exact same browser tab ONLY when leaveSecret matches
+    const rawTabId =
+      typeof body.clientOptions?.tabId === 'string'
+        ? body.clientOptions.tabId.trim().slice(0, 64)
+        : '';
+    const rawLeaveSecret =
+      typeof body.clientOptions?.leaveSecret === 'string'
+        ? body.clientOptions.leaveSecret.trim().slice(0, 128)
+        : '';
+    if (rawTabId && rawLeaveSecret.length >= 12) {
+      for (const liveRoom of activeCloudRooms.values()) {
+        liveRoom.evictClientSession(undefined, rawTabId, rawLeaveSecret);
+      }
+    }
+
     let rooms = await listActiveRoomCaches();
-    const rawTarget = (body.preferredRoomCode || body.roomCodeOrId || '').trim();
-    const upperTarget = rawTarget.toUpperCase();
+    const rawTarget = (body.preferredRoomCode || body.roomCodeOrId || body.roomCode || '').trim();
+    const normalizedTarget = normalizeRoomCode(rawTarget);
 
     let chosen: IRoomCache<CloudRoomMetadata> | undefined;
     let fallbackFromFull = false;
@@ -104,7 +159,7 @@ async function resolveWarmestOrPreferredRoom(body: ResolveRoomRequestBody): Prom
       const exactMatch = rooms.find(
         (r) =>
           r.roomId === rawTarget ||
-          (r.metadata?.roomCode || '').toUpperCase() === upperTarget
+          normalizeRoomCode(r.metadata?.roomCode || '') === normalizedTarget
       );
 
       if (exactMatch) {
@@ -113,11 +168,22 @@ async function resolveWarmestOrPreferredRoom(body: ResolveRoomRequestBody): Prom
         } else {
           fallbackFromFull = true;
         }
-      } else if (/^[A-Z0-9-]{3,10}$/.test(upperTarget)) {
-        // Create requested named channel / friend code on demand
+      } else if (ROOM_CODE_REGEX.test(normalizedTarget)) {
+        // Create requested named channel / friend code on demand (3..14 chars)
         chosen = (await matchMaker.createRoom(ROOM_TYPE, {
-          customRoomCode: upperTarget,
+          customRoomCode: normalizedTarget,
         })) as IRoomCache<CloudRoomMetadata>;
+      } else if (body.strictCustomCode) {
+        return {
+          ok: false,
+          error: 'Mã phòng cần từ 3–14 ký tự chữ hoặc số (VD: DALAT-SANMAY).',
+          roomId: '',
+          roomCode: '',
+          channelName: '',
+          playerCount: 0,
+          softCap: WORLD_CONSTANTS.SOFT_ROOM_CAP,
+          hardCap: WORLD_CONSTANTS.HARD_ROOM_CAP,
+        };
       }
     }
 
@@ -150,6 +216,13 @@ async function resolveWarmestOrPreferredRoom(body: ResolveRoomRequestBody): Prom
 }
 
 async function parseJsonBody(ctx: { body?: unknown; request?: Request }): Promise<ResolveRoomRequestBody> {
+  if (typeof ctx.body === 'string') {
+    try {
+      return JSON.parse(ctx.body) as ResolveRoomRequestBody;
+    } catch {
+      return {};
+    }
+  }
   if (ctx.body && typeof ctx.body === 'object') {
     return ctx.body as ResolveRoomRequestBody;
   }
@@ -164,39 +237,122 @@ async function parseJsonBody(ctx: { body?: unknown; request?: Request }): Promis
   return {};
 }
 
-const healthEndpoint = createEndpoint('/health', { method: 'GET' }, async () => {
+const healthEndpoint = createEndpoint('/health', { method: 'GET' }, async (ctx) => {
   const rooms = await listActiveRoomCaches();
   const totalPlayers = rooms.reduce((sum, r) => sum + r.clients, 0);
-  return jsonResponse({
-    ok: true,
-    service: 'dalat-cloud-hunting-server',
-    uptimeSec: Math.round(process.uptime()),
-    roomCount: rooms.length,
-    totalPlayers,
-    serverEpochMs: Date.now(),
-  });
+  return jsonResponse(
+    {
+      ok: true,
+      service: 'dalat-cloud-hunting-server',
+      uptimeSec: Math.round(process.uptime()),
+      roomCount: rooms.length,
+      totalPlayers,
+      serverEpochMs: Date.now(),
+    },
+    200,
+    ctx.request
+  );
 });
 
-const channelsEndpoint = createEndpoint('/api/channels', { method: 'GET' }, async () => {
+const channelsEndpoint = createEndpoint('/api/channels', { method: 'GET' }, async (ctx) => {
   let rooms = await listActiveRoomCaches();
   if (rooms.length === 0) {
     await matchMaker.createRoom(ROOM_TYPE, { customRoomCode: 'MAY-01', keepAlive: true });
     rooms = await listActiveRoomCaches();
   }
   const channels: RoomChannelSummary[] = rooms.map(toChannelSummary);
-  return jsonResponse(channels);
+  return jsonResponse(channels, 200, ctx.request);
 });
 
 const resolveRoomEndpoint = createEndpoint('/api/resolve-room', { method: 'POST' }, async (ctx) => {
+  if (!checkRateLimit(ctx.request, 'resolve', 35, 10_000)) {
+    return jsonResponse(
+      { ok: false, error: 'Quá nhiều yêu cầu kết nối liên tiếp, vui lòng thử lại sau ít giây.' },
+      429,
+      ctx.request
+    );
+  }
   const body = await parseJsonBody(ctx);
   const resolved = await resolveWarmestOrPreferredRoom(body);
-  return jsonResponse(resolved);
+  if (resolved.ok === false) {
+    return jsonResponse(resolved, 400, ctx.request);
+  }
+  return jsonResponse(resolved, 200, ctx.request);
 });
 
 const joinChannelEndpoint = createEndpoint('/api/join-channel', { method: 'POST' }, async (ctx) => {
+  if (!checkRateLimit(ctx.request, 'join', 25, 10_000)) {
+    return jsonResponse(
+      { ok: false, error: 'Quá nhiều yêu cầu chuyển kênh liên tiếp, vui lòng thử lại sau ít giây.' },
+      429,
+      ctx.request
+    );
+  }
   const body = await parseJsonBody(ctx);
-  const resolved = await resolveWarmestOrPreferredRoom(body);
-  return jsonResponse(resolved);
+  const hasExplicitCode = Boolean(
+    (body.preferredRoomCode || body.roomCodeOrId || body.roomCode || '').trim()
+  );
+  const resolved = await resolveWarmestOrPreferredRoom({
+    ...body,
+    strictCustomCode: body.strictCustomCode ?? hasExplicitCode,
+  });
+  if (resolved.ok === false) {
+    return jsonResponse(resolved, 400, ctx.request);
+  }
+  return jsonResponse(resolved, 200, ctx.request);
+});
+
+const leaveTabEndpoint = createEndpoint('/api/leave-tab', { method: 'POST' }, async (ctx) => {
+  if (!checkRateLimit(ctx.request, 'leave', 30, 10_000)) {
+    return jsonResponse({ ok: false, error: 'Rate limit exceeded' }, 429, ctx.request);
+  }
+  const body = (await parseJsonBody(ctx)) as {
+    roomId?: string;
+    sessionId?: string;
+    tabId?: string;
+    leaveSecret?: string;
+  };
+  const roomId = typeof body?.roomId === 'string' ? body.roomId.trim() : '';
+  const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
+  const tabId = typeof body?.tabId === 'string' ? body.tabId.trim().slice(0, 64) : '';
+  const leaveSecret =
+    typeof body?.leaveSecret === 'string' ? body.leaveSecret.trim().slice(0, 128) : '';
+
+  if ((!sessionId && !tabId) || leaveSecret.length < 12) {
+    return jsonResponse(
+      { ok: false, error: 'Forbidden: missing session ownership secret' },
+      403,
+      ctx.request
+    );
+  }
+
+  let anyMatched = false;
+  let anyAuthorized = false;
+
+  if (roomId) {
+    const rm = activeCloudRooms.get(roomId);
+    if (rm) {
+      const res = rm.evictClientSession(sessionId, tabId, leaveSecret);
+      if (res.matched) anyMatched = true;
+      if (res.authorized) anyAuthorized = true;
+    }
+  } else {
+    for (const rm of activeCloudRooms.values()) {
+      const res = rm.evictClientSession(sessionId, tabId, leaveSecret);
+      if (res.matched) anyMatched = true;
+      if (res.authorized) anyAuthorized = true;
+    }
+  }
+
+  if (anyMatched && !anyAuthorized) {
+    return jsonResponse(
+      { ok: false, error: 'Forbidden: invalid session ownership secret' },
+      403,
+      ctx.request
+    );
+  }
+
+  return jsonResponse({ ok: true, evicted: anyMatched && anyAuthorized }, 200, ctx.request);
 });
 
 const transport = new BunWebSockets({
@@ -266,6 +422,9 @@ transport.bindRouter = (router: any) => {
   const wrappedRouter = {
     ...router,
     findRoute(method: string, pathname: string) {
+      if (method === 'OPTIONS' && isBackendApiRoute(pathname)) {
+        return { corsPreflight: true };
+      }
       if (isBackendApiRoute(pathname)) {
         return router.findRoute(method, pathname);
       }
@@ -279,6 +438,9 @@ transport.bindRouter = (router: any) => {
     },
     async handler(req: Request) {
       const url = new URL(req.url);
+      if (req.method === 'OPTIONS' && isBackendApiRoute(url.pathname)) {
+        return new Response(null, { status: 204, headers: buildCorsHeaders(req) });
+      }
       if (isBackendApiRoute(url.pathname)) {
         return router.handler(req);
       }
@@ -305,6 +467,7 @@ gameServer.router = createRouter(
     channelsEndpoint,
     resolveRoomEndpoint,
     joinChannelEndpoint,
+    leaveTabEndpoint,
   },
   { openapi: { disabled: true } }
 );

@@ -28,7 +28,7 @@ import {
   SHARED_VCOLOR_MAT,
 } from '../gameplay/WardrobeAssets3D';
 
-const THUMB_PX = 176;
+const THUMB_PX = 128;
 const DEFAULT_REF_GLB = '/assets/models/hiker_f_adventurer.glb?v=rpm2';
 const DEFAULT_MALE_REF_GLB = '/assets/models/hiker_m_jacket.glb?v=rpm2';
 
@@ -56,7 +56,68 @@ let studioCtx: {
   camera: THREE.PerspectiveCamera;
 } | null = null;
 
+const STUDIO_IDLE_DISPOSE_MS = 1500;
+let idleDisposeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function cancelStudioIdleDispose(): void {
+  if (idleDisposeTimer !== null) {
+    clearTimeout(idleDisposeTimer);
+    idleDisposeTimer = null;
+  }
+}
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    const cleanup = () => {
+      reader.onloadend = null;
+      reader.onerror = null;
+    };
+    reader.onloadend = () => {
+      const res = typeof reader.result === 'string' ? reader.result : '';
+      cleanup();
+      resolve(res);
+    };
+    reader.onerror = () => {
+      cleanup();
+      resolve('');
+    };
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function canvasToThumbnailDataUrl(canvas: HTMLCanvasElement): Promise<string> {
+  if (typeof canvas.toBlob === 'function') {
+    const webpBlob = await new Promise<Blob | null>((resolve) => {
+      try {
+        canvas.toBlob((b) => resolve(b), 'image/webp', 0.86);
+      } catch {
+        resolve(null);
+      }
+    });
+    if (webpBlob && webpBlob.type === 'image/webp') {
+      const url = await blobToDataUrl(webpBlob);
+      if (url) return url;
+    }
+    const pngBlob = await new Promise<Blob | null>((resolve) => {
+      try {
+        canvas.toBlob((b) => resolve(b), 'image/png');
+      } catch {
+        resolve(null);
+      }
+    });
+    if (pngBlob) {
+      const url = await blobToDataUrl(pngBlob);
+      if (url) return url;
+    }
+  }
+  const webp = canvas.toDataURL('image/webp', 0.86);
+  if (webp.startsWith('data:image/webp')) return webp;
+  return canvas.toDataURL('image/png');
+}
+
 function getStudioContext() {
+  cancelStudioIdleDispose();
   if (studioCtx) return studioCtx;
 
   const canvas = document.createElement('canvas');
@@ -243,16 +304,43 @@ const jobQueue: Array<{
 }> = [];
 let queueScheduled = false;
 
+function disposeStudioContext(): void {
+  cancelStudioIdleDispose();
+  if (!studioCtx) return;
+  const { renderer, subjectRoot } = studioCtx;
+  studioCtx = null;
+  try {
+    clearSubjectRoot(subjectRoot);
+    renderer.renderLists?.dispose?.();
+    renderer.dispose();
+    renderer.forceContextLoss();
+  } catch {
+    // Ignore WebGL context disposal errors in headless or lost-context environments
+  }
+}
+
+function scheduleStudioIdleDispose(): void {
+  cancelStudioIdleDispose();
+  if (!studioCtx || typeof window === 'undefined') return;
+  idleDisposeTimer = setTimeout(() => {
+    idleDisposeTimer = null;
+    if (jobQueue.length === 0 && inflightJobs.size === 0 && !queueScheduled) {
+      disposeStudioContext();
+    }
+  }, STUDIO_IDLE_DISPOSE_MS);
+}
+
 function scheduleQueueFlush(): void {
   if (queueScheduled || typeof window === 'undefined') return;
   queueScheduled = true;
-  requestAnimationFrame(() => {
+  setTimeout(() => {
     void flushQueueBatch();
-  });
+  }, 16);
 }
 
 async function flushQueueBatch(): Promise<void> {
-  const batch = jobQueue.splice(0, 6);
+  // Process 1 thumbnail per macrotask slice so offscreen studio rendering never steals >4ms from 60 FPS rAF!
+  const batch = jobQueue.splice(0, 1);
   for (const item of batch) {
     try {
       const hit = dataUrlCache.get(item.key);
@@ -272,6 +360,8 @@ async function flushQueueBatch(): Promise<void> {
   queueScheduled = false;
   if (jobQueue.length > 0) {
     scheduleQueueFlush();
+  } else {
+    scheduleStudioIdleDispose();
   }
 }
 
@@ -282,6 +372,7 @@ function enqueueThumbnailJob(key: string, task: RenderJobTask): Promise<string> 
   const existing = inflightJobs.get(key);
   if (existing) return existing;
 
+  cancelStudioIdleDispose();
   const p = new Promise<string>((resolve) => {
     jobQueue.push({ key, task, resolve });
     scheduleQueueFlush();
@@ -345,9 +436,8 @@ export function renderCoatStudioThumbnail(
 
     frameCameraToBox(camera, box, new THREE.Vector3(0.28, 0.14, 0.95), 1.12);
     renderer.render(scene, camera);
-    const out = renderer.domElement.toDataURL('image/png');
     clearSubjectRoot(subjectRoot);
-    return out;
+    return await canvasToThumbnailDataUrl(renderer.domElement);
   });
 
   return { key, promise };
@@ -422,9 +512,8 @@ export function renderHeadwearStudioThumbnail(
     }
 
     renderer.render(scene, camera);
-    const out = renderer.domElement.toDataURL('image/png');
     clearSubjectRoot(subjectRoot);
-    return out;
+    return await canvasToThumbnailDataUrl(renderer.domElement);
   });
 
   return { key, promise };
@@ -489,9 +578,8 @@ export function renderNeckwearStudioThumbnail(
     }
 
     renderer.render(scene, camera);
-    const out = renderer.domElement.toDataURL('image/png');
     clearSubjectRoot(subjectRoot);
-    return out;
+    return await canvasToThumbnailDataUrl(renderer.domElement);
   });
 
   return { key, promise };
@@ -523,9 +611,8 @@ export function renderEyewearStudioThumbnail(eyewearId: EyewearId): {
     frameCameraToBox(camera, box, dir, 1.2);
 
     renderer.render(scene, camera);
-    const out = renderer.domElement.toDataURL('image/png');
     clearSubjectRoot(subjectRoot);
-    return out;
+    return await canvasToThumbnailDataUrl(renderer.domElement);
   });
 
   return { key, promise };
@@ -580,9 +667,8 @@ export function renderBagStudioThumbnail(
     }
 
     renderer.render(scene, camera);
-    const out = renderer.domElement.toDataURL('image/png');
     clearSubjectRoot(subjectRoot);
-    return out;
+    return await canvasToThumbnailDataUrl(renderer.domElement);
   });
 
   return { key, promise };
@@ -616,10 +702,28 @@ export function renderHeldPropStudioThumbnail(itemId: HeldItemId): {
     frameCameraToBox(camera, box, dir, 1.16);
 
     renderer.render(scene, camera);
-    const out = renderer.domElement.toDataURL('image/png');
     clearSubjectRoot(subjectRoot);
-    return out;
+    return await canvasToThumbnailDataUrl(renderer.domElement);
   });
 
   return { key, promise };
+}
+
+let hudPropsPrewarmed = false;
+
+/**
+ * Gently pre-warms the 4 favorite HUD quick-prop icons across staggered idle slices
+ * so entering the world hits 100% cache with 0ms main-thread WebGL work.
+ */
+export function prewarmHudPropThumbnails(): void {
+  if (hudPropsPrewarmed || typeof window === 'undefined') return;
+  hudPropsPrewarmed = true;
+  const ids: HeldItemId[] = ['soy_milk', 'phin_coffee', 'lantern', 'guitar'];
+  ids.forEach((id, idx) => {
+    setTimeout(() => {
+      if (!dataUrlCache.has(`prop|${id}`)) {
+        void renderHeldPropStudioThumbnail(id);
+      }
+    }, 50 + idx * 32);
+  });
 }

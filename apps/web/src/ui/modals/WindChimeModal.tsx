@@ -1,10 +1,13 @@
-import { FormEvent, useMemo, useState } from 'react';
-import { Feather, Wind } from 'lucide-react';
+import { FormEvent, useEffect, useMemo, useState } from 'react';
+import { Compass, Feather, Wind } from 'lucide-react';
 import { WindChimeNote } from '@dalat/protocol';
 import type { IMultiplayerController } from '../../network/types';
+import { INTERACTION_SPOTS } from '../../gameplay/interactions';
 import { useNetController } from '../../gameplay/netBridge';
 import { useGameStore } from '../../store/gameStore';
 import { UI_COLORS, UI_FONTS } from '../uiStyles';
+import { useViewportLayout } from '../useViewportLayout';
+import { JournalNavBar } from './JournalNavBar';
 import { ModalShell } from './ModalShell';
 
 const STARTER_WISHES: WindChimeNote[] = [
@@ -36,10 +39,32 @@ const STARTER_WISHES: WindChimeNote[] = [
 
 export function WindChimeModal({ net: propNet }: { net?: IMultiplayerController }) {
   const net = useNetController(propNet);
+  const { isMobileLayout } = useViewportLayout();
   const windChimeNotes = useGameStore((s) => s.windChimeNotes);
+  const teleportToLandmark = useGameStore((s) => s.teleportToLandmark);
   const showToast = useGameStore((s) => s.showToast);
 
   const [wishText, setWishText] = useState('');
+
+  const computeDistToPine = () => {
+    const lt = useGameStore.getState().localTransient;
+    return Math.hypot(
+      lt.x - INTERACTION_SPOTS.LONELY_PINE_WISH[0],
+      lt.z - INTERACTION_SPOTS.LONELY_PINE_WISH[2]
+    );
+  };
+
+  const [distToPine, setDistToPine] = useState<number>(computeDistToPine);
+
+  // Poll localTransient position every 250ms while open so distance updates live after sliding/teleport
+  useEffect(() => {
+    setDistToPine(computeDistToPine());
+    const timer = window.setInterval(() => {
+      const next = computeDistToPine();
+      setDistToPine((prev) => (Math.abs(prev - next) >= 0.4 ? next : prev));
+    }, 250);
+    return () => window.clearInterval(timer);
+  }, []);
 
   const notes = useMemo(
     () => (windChimeNotes.length > 0 ? windChimeNotes : STARTER_WISHES),
@@ -65,15 +90,62 @@ export function WindChimeModal({ net: propNet }: { net?: IMultiplayerController 
     }
 
     setWishText('');
-    showToast('🎐 Đã treo thẻ gỗ Mộc Diệp lên tán Cây Thông Cô Đơn — Tiếng chuông gió khẽ ngân...');
+    showToast('🎐 Đã treo thẻ gỗ Mộc Diệp lên tán Cây Thông Cô Đơn — Tiếng chuông gió khẽ ngân…');
   };
 
   return (
     <ModalShell
       title="Thẻ Gỗ Ước Nguyện (Mộc Diệp)"
       subtitle="Dưới tán Cây Thông Cô Đơn lộng gió nhìn về đỉnh Langbiang, mỗi thẻ gỗ gửi gắm một lời chúc lành"
-      maxWidth="720px"
+      maxWidth="740px"
     >
+      <JournalNavBar active="windchimes" />
+
+      {/* Spatial Context Ribbon if player opened from afar */}
+      {distToPine > 28 && (
+        <div
+          style={{
+            padding: '10px 14px',
+            borderRadius: '14px',
+            background: 'rgba(130, 214, 158, 0.09)',
+            border: '1px solid rgba(130, 214, 158, 0.34)',
+            marginBottom: '14px',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '10px',
+            fontSize: '12px',
+            color: UI_COLORS.cream,
+          }}
+        >
+          <span>
+            🌲 Thẻ ước nguyện được treo trên tán <b>Cây Thông Cô Đơn</b> (cách bạn {Math.round(distToPine)}m).
+          </span>
+          <button
+            type="button"
+            onClick={() => teleportToLandmark('cay-thong-co-don')}
+            className="dalat-glass-btn"
+            style={{
+              minHeight: '40px',
+              padding: '6px 13px',
+              borderRadius: '999px',
+              background: 'rgba(243, 195, 130, 0.18)',
+              border: `1px solid ${UI_COLORS.warmAmber}`,
+              color: UI_COLORS.warmAmber,
+              fontSize: '12px',
+              fontWeight: 600,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '5px',
+            }}
+          >
+            <Compass size={13} />
+            <span>Ghé tới gốc thông</span>
+          </button>
+        </div>
+      )}
+
       {/* Write & Hang New Wooden Plaque */}
       <form
         onSubmit={handleHangWish}
@@ -88,35 +160,40 @@ export function WindChimeModal({ net: propNet }: { net?: IMultiplayerController 
           gap: '10px',
         }}
       >
-        <div
+        <label
+          htmlFor="dalat-wish-input"
           style={{
             display: 'flex',
             alignItems: 'center',
             gap: '7px',
-            fontSize: '12px',
+            fontSize: '12.5px',
+            fontWeight: 600,
             color: UI_COLORS.warmAmber,
           }}
         >
           <Feather size={14} />
           <span>Viết điều ước của bạn lên thẻ gỗ thông</span>
-        </div>
+        </label>
 
         <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
           <input
+            id="dalat-wish-input"
             type="text"
             value={wishText}
             maxLength={140}
             onChange={(e) => setWishText(e.target.value)}
-            placeholder="Gửi đôi dòng ước nguyện theo gió cao nguyên..."
+            placeholder="Gửi đôi dòng ước nguyện theo gió cao nguyên…"
             style={{
               flex: 1,
-              minWidth: '220px',
+              minWidth: 'min(100%, 220px)',
+              minHeight: '44px',
+              boxSizing: 'border-box',
               padding: '10px 13px',
               borderRadius: '12px',
-              background: 'rgba(10, 15, 25, 0.55)',
+              background: 'rgba(10, 15, 25, 0.66)',
               border: `1px solid ${UI_COLORS.border}`,
               color: UI_COLORS.cream,
-              fontSize: '13px',
+              fontSize: isMobileLayout ? '16px' : '14px',
               outline: 'none',
             }}
           />
@@ -124,14 +201,15 @@ export function WindChimeModal({ net: propNet }: { net?: IMultiplayerController 
             type="submit"
             className="dalat-glass-btn"
             style={{
+              minHeight: '44px',
               padding: '10px 18px',
               borderRadius: '12px',
               background:
-                'linear-gradient(135deg, rgba(226, 152, 86, 0.92), rgba(196, 112, 68, 0.92))',
-              border: '1px solid rgba(255, 226, 182, 0.5)',
+                'linear-gradient(135deg, rgba(243, 195, 130, 0.94), rgba(226, 148, 86, 0.92))',
+              border: '1px solid rgba(255, 226, 182, 0.52)',
               color: '#171D2A',
               fontSize: '12.5px',
-              fontWeight: 600,
+              fontWeight: 700,
               display: 'inline-flex',
               alignItems: 'center',
               gap: '6px',
@@ -147,7 +225,7 @@ export function WindChimeModal({ net: propNet }: { net?: IMultiplayerController 
       <div
         style={{
           display: 'grid',
-          gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))',
+          gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 200px), 1fr))',
           gap: '14px',
         }}
       >
@@ -160,7 +238,7 @@ export function WindChimeModal({ net: propNet }: { net?: IMultiplayerController 
               borderRadius: '10px 10px 16px 16px',
               background:
                 'linear-gradient(180deg, rgba(168, 118, 74, 0.34) 0%, rgba(114, 76, 46, 0.38) 100%)',
-              border: '1px solid rgba(235, 192, 140, 0.32)',
+              border: '1px solid rgba(235, 192, 140, 0.34)',
               transformOrigin: 'top center',
               animation: `dalatPlaqueSway ${4.4 + (idx % 4) * 0.6}s ease-in-out infinite`,
               display: 'flex',
@@ -169,7 +247,6 @@ export function WindChimeModal({ net: propNet }: { net?: IMultiplayerController 
               gap: '12px',
             }}
           >
-            {/* Red braided cord hole */}
             <div
               style={{
                 position: 'absolute',
@@ -185,12 +262,14 @@ export function WindChimeModal({ net: propNet }: { net?: IMultiplayerController 
             />
 
             <p
+              className="dalat-serif"
               style={{
                 fontFamily: UI_FONTS.serif,
                 fontStyle: 'italic',
-                fontSize: '13.5px',
+                fontSize: '14px',
                 lineHeight: 1.52,
                 color: '#FCF3E4',
+                margin: 0,
               }}
             >
               “{note.message}”
@@ -198,10 +277,10 @@ export function WindChimeModal({ net: propNet }: { net?: IMultiplayerController 
 
             <div
               style={{
-                fontSize: '11px',
+                fontSize: '12px',
                 color: UI_COLORS.warmAmber,
                 textAlign: 'right',
-                fontWeight: 500,
+                fontWeight: 600,
               }}
             >
               — {note.authorName}

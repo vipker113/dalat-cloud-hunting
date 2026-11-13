@@ -1,6 +1,6 @@
-import { useEffect } from 'react';
+import { useEffect, useRef } from 'react';
 import * as THREE from 'three';
-import { Canvas } from '@react-three/fiber';
+import { Canvas, useFrame } from '@react-three/fiber';
 import { DaLatWorldRoot } from './world';
 import { GameplayRoot, setNetController } from './gameplay';
 import { DiegeticUIRoot } from './ui';
@@ -13,6 +13,22 @@ setNetController(multiplayerManager);
 
 if (import.meta.env.DEV) {
   installDalatQABridge();
+}
+
+function SceneReadyTracker() {
+  const framesRef = useRef(0);
+  const doneRef = useRef(false);
+
+  useFrame(() => {
+    if (doneRef.current) return;
+    framesRef.current += 1;
+    if (framesRef.current >= 3) {
+      doneRef.current = true;
+      useGameStore.getState().markSceneReady();
+    }
+  });
+
+  return null;
 }
 
 export function App() {
@@ -54,6 +70,7 @@ export function App() {
       >
         <DaLatWorldRoot />
         <GameplayRoot net={multiplayerManager} />
+        <SceneReadyTracker />
       </Canvas>
 
       <div

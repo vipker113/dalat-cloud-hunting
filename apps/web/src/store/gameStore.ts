@@ -10,6 +10,7 @@ import {
   FarPeerBeacon,
   getCoatGender,
   HeldItemId,
+  LANDMARK_LIST,
   LANDMARKS,
   LandmarkId,
   PlayerOutfit,
@@ -20,9 +21,39 @@ import {
   WeatherStateId,
   WindChimeNote,
 } from '@dalat/protocol';
+import { getNetController } from '../gameplay/netBridge';
 
 export type QualityTier = 'high' | 'medium' | 'mobile';
-export type UIOverlayModal = 'none' | 'wardrobe' | 'channels' | 'map' | 'almanac' | 'polaroids' | 'windchimes' | 'settings';
+export type UIOverlayModal =
+  | 'none'
+  | 'wardrobe'
+  | 'channels'
+  | 'map'
+  | 'almanac'
+  | 'polaroids'
+  | 'windchimes'
+  | 'settings';
+
+export type OnboardingStep = 'move' | 'look' | 'interact' | 'done';
+
+export interface ChatLogEntry extends ChatBubbleMessage {
+  landmarkShort?: string;
+}
+
+export interface UXSessionMetrics {
+  mountedAtMs: number;
+  enteredWorldAtMs: number | null;
+  timeToEnterMs: number | null;
+  firstWalkAtMs: number | null;
+  firstOrbitAtMs: number | null;
+  timeToControlsSec: number | null;
+  mapFastTravels: number;
+  friendTeleports: number;
+  contextInteractions: number;
+  socialInteractions: number;
+  inviteCopies: number;
+  photosCaptured: number;
+}
 
 export interface RemotePeerState {
   sessionId: string;
@@ -44,6 +75,8 @@ export interface RemotePeerState {
   running: boolean;
   grounded: boolean;
   warmBuff: boolean;
+  lastNearSnapMs?: number;
+  inNearAoi?: boolean;
 }
 
 export interface RoomChannelInfo {
@@ -65,6 +98,7 @@ export interface LocalPlayerTransient {
   yaw: number;
   cameraYaw: number;
   cameraPitch: number;
+  targetCameraDistance: number;
   moving: boolean;
   running: boolean;
   grounded: boolean;
@@ -79,6 +113,10 @@ export interface LocalPlayerTransient {
   previewCurrentPanY: number;
   previewTargetZoom: number;
   previewCurrentZoom: number;
+  camX: number;
+  camY: number;
+  camZ: number;
+  cameraOccludesSelf: boolean;
 }
 
 export interface PerfMetricsSnapshot {
@@ -94,7 +132,15 @@ export interface InteractPrompt {
   id: string;
   label: string;
   sublabel?: string;
-  actionType: 'brew_phin' | 'soy_milk' | 'sit_bench' | 'polaroid_board' | 'wind_chime' | 'acoustic_jam' | 'cub_photo';
+  actionType:
+    | 'brew_phin'
+    | 'soy_milk'
+    | 'sit_bench'
+    | 'polaroid_board'
+    | 'wind_chime'
+    | 'acoustic_jam'
+    | 'cub_photo'
+    | 'valley_return';
   benchId?: string;
   position: [number, number, number];
 }
@@ -129,8 +175,11 @@ export interface IncomingSocialPrompt {
 }
 
 export interface GameStoreState {
-  // Entry & Session
+  // Entry, Loading & Session
+  sceneReady: boolean;
   hasEnteredWorld: boolean;
+  visitCount: number;
+  onboardingStep: OnboardingStep;
   displayName: string;
   outfit: PlayerOutfit;
   heldItem: HeldItemId;
@@ -154,9 +203,13 @@ export interface GameStoreState {
 
   // Mutable high-frequency transient ref read/written inside useFrame (0 React re-renders!)
   localTransient: LocalPlayerTransient;
-  teleportTarget: { position: [number, number, number]; lookAt?: [number, number, number]; nonce: number } | null;
+  teleportTarget: {
+    position: [number, number, number];
+    lookAt?: [number, number, number];
+    nonce: number;
+  } | null;
 
-  // Atmosphere & Quality
+  // Atmosphere, Comfort & Quality
   atmosphere: AtmosphereSnapshot;
   overrideGameHour: number | null;
   overrideWeather: WeatherStateId | null;
@@ -164,10 +217,17 @@ export interface GameStoreState {
   autoQuality: boolean;
   audioEnabled: boolean;
   masterVolume: number;
+  cameraSensitivity: number;
+  reducedMotion: boolean;
+  quietMode: boolean;
 
   // Social & World Persistence
   chatBubbles: ChatBubbleMessage[];
+  chatHistory: ChatLogEntry[];
+  unreadChatCount: number;
+  chatDrawerOpen: boolean;
   polaroids: PolaroidEntry[];
+  capturedPolaroids: PolaroidEntry[];
   windChimeNotes: WindChimeNote[];
   lastJamNote: AcousticJamNote | null;
   discoveredLandmarks: Record<LandmarkId, boolean>;
@@ -179,20 +239,24 @@ export interface GameStoreState {
   photoFocalMm: 24 | 35 | 50 | 85;
   photoFilter: 'natural' | 'kodak_dawn' | 'fuji_pine' | 'dreamy_mist';
   photoHideCrowd: boolean;
+  photoIncludeInviteCode: boolean;
   photoCountdown: number; // 0 = idle, 3..1 = counting
   photoShutterNonce: number;
   latestCapturedPolaroid: PolaroidEntry | null;
   nearbyPrompt: InteractPrompt | null;
   nearbyPeer: NearbyPeerInfo | null;
   selectedPeerSessionId: string | null;
+  dismissedPeerId: string | null;
   incomingSocialPrompt: IncomingSocialPrompt | null;
   previewYawOffset: number;
   isDraggingPreview: boolean;
   socialSparkleBurst: SocialSparkleBurst | null;
   toastBanner: string | null;
   perfMetrics: PerfMetricsSnapshot;
+  uxMetrics: UXSessionMetrics;
 
   // Actions
+  markSceneReady: () => void;
   setDisplayName: (name: string) => void;
   updateOutfit: (partial: Partial<PlayerOutfit>) => void;
   enterWorld: () => void;
@@ -203,18 +267,36 @@ export interface GameStoreState {
   tickWarmthAndAtmosphere: (dtSec: number) => void;
   teleportTo: (position: [number, number, number], lookAt?: [number, number, number]) => void;
   teleportToLandmark: (id: LandmarkId) => void;
+  teleportToPeer: (sessionId: string) => boolean;
   setOverrideAtmosphere: (gameHour: number | null, weather: WeatherStateId | null) => void;
   setQualityTier: (tier: QualityTier, auto?: boolean) => void;
   setAudioEnabled: (enabled: boolean) => void;
   setMasterVolume: (v: number) => void;
+  setCameraSensitivity: (v: number) => void;
+  setReducedMotion: (enabled: boolean) => void;
+  setQuietMode: (enabled: boolean) => void;
   setActiveModal: (modal: UIOverlayModal) => void;
+  setChatDrawerOpen: (open: boolean) => void;
+  clearUnreadChat: () => void;
   setPhotoMode: (active: boolean) => void;
-  setPhotoOptions: (opts: Partial<Pick<GameStoreState, 'photoFocalMm' | 'photoFilter' | 'photoHideCrowd' | 'photoCountdown'>>) => void;
+  setPhotoOptions: (
+    opts: Partial<
+      Pick<
+        GameStoreState,
+        | 'photoFocalMm'
+        | 'photoFilter'
+        | 'photoHideCrowd'
+        | 'photoIncludeInviteCode'
+        | 'photoCountdown'
+      >
+    >
+  ) => void;
   requestPhotoShutter: () => void;
   setLatestCapturedPolaroid: (entry: PolaroidEntry | null) => void;
   setNearbyPrompt: (prompt: InteractPrompt | null) => void;
   setNearbyPeer: (peer: NearbyPeerInfo | null) => void;
   setSelectedPeer: (sessionId: string | null) => void;
+  dismissPeerPrompt: (sessionId: string | null) => void;
   setIncomingSocialPrompt: (prompt: IncomingSocialPrompt | null) => void;
   setPreviewYawOffset: (yaw: number) => void;
   addPreviewYawOffset: (deltaYaw: number) => void;
@@ -223,10 +305,30 @@ export interface GameStoreState {
   triggerSocialSparkle: (kind: SocialSparkleBurst['kind'], x: number, y: number, z: number) => void;
   showToast: (msg: string) => void;
   markLandmarkDiscovered: (id: LandmarkId) => void;
+  advanceOnboarding: (action: 'move' | 'look' | 'interact' | 'skip') => void;
+  recordUXEvent: (
+    kind: 'context_interact' | 'social_interact' | 'invite_copy' | 'photo_capture'
+  ) => void;
   setPerfMetrics: (metrics: PerfMetricsSnapshot) => void;
 
   // Network Mutators (called by network/multiplayerClient.ts)
-  setNetworkStatus: (patch: Partial<Pick<GameStoreState, 'connected' | 'connecting' | 'localSessionId' | 'roomCode' | 'channelName' | 'roomId' | 'rttMs' | 'serverTimeOffsetMs' | 'availableChannels' | 'occupiedBenches'>>) => void;
+  setNetworkStatus: (
+    patch: Partial<
+      Pick<
+        GameStoreState,
+        | 'connected'
+        | 'connecting'
+        | 'localSessionId'
+        | 'roomCode'
+        | 'channelName'
+        | 'roomId'
+        | 'rttMs'
+        | 'serverTimeOffsetMs'
+        | 'availableChannels'
+        | 'occupiedBenches'
+      >
+    >
+  ) => void;
   upsertPeer: (peer: RemotePeerState) => void;
   removePeer: (sessionId: string) => void;
   resetPeers: () => void;
@@ -234,41 +336,259 @@ export interface GameStoreState {
   pushChatBubble: (msg: ChatBubbleMessage) => void;
   setPolaroids: (items: PolaroidEntry[]) => void;
   prependPolaroid: (item: PolaroidEntry) => void;
+  saveCapturedPolaroid: (item: PolaroidEntry) => void;
   setWindChimeNotes: (notes: WindChimeNote[]) => void;
   prependWindChimeNote: (note: WindChimeNote) => void;
   setLastJamNote: (jam: AcousticJamNote) => void;
 }
 
-const spawn = LANDMARKS['quan-mo-suong'].position;
+const STORAGE_KEY_V2 = 'dalat_state_v2';
+const POLAROID_ALBUM_KEY = 'dalat_polaroid_album_v1';
 
-function loadSavedProfile(): { name: string; outfit: PlayerOutfit } {
+const DEFAULT_LANDMARKS: Record<LandmarkId, boolean> = {
+  'quan-mo-suong': true,
+  'cau-go-san-may': false,
+  'cay-thong-co-don': false,
+  'dai-ngam-den': false,
+  'gac-che-1927': false,
+};
+
+const SHORT_SPOT_NAMES: Record<LandmarkId, string> = {
+  'quan-mo-suong': 'Mơ Sương',
+  'cau-go-san-may': 'Cầu Gỗ',
+  'cay-thong-co-don': 'Thông Cô Đơn',
+  'dai-ngam-den': 'Thung Lũng Đèn',
+  'gac-che-1927': 'Gác Chè 1927',
+};
+
+function resolveNearestShortLandmark(x: number, z: number): string {
+  let best = LANDMARK_LIST[0];
+  let minD = Infinity;
+  for (let i = 0; i < LANDMARK_LIST.length; i++) {
+    const lm = LANDMARK_LIST[i];
+    const d = Math.hypot(x - lm.position[0], z - lm.position[2]);
+    if (d < minD) {
+      minD = d;
+      best = lm;
+    }
+  }
+  return SHORT_SPOT_NAMES[best.id] || 'Đồi Cầu Đất';
+}
+
+interface PersistedStateV2 {
+  version: 2;
+  name: string;
+  outfit: PlayerOutfit;
+  heldItem: HeldItemId;
+  discoveredLandmarks: Record<LandmarkId, boolean>;
+  discoveredWeathers: Partial<Record<WeatherStateId, boolean>>;
+  audioEnabled: boolean;
+  masterVolume: number;
+  cameraSensitivity: number;
+  reducedMotion: boolean;
+  quietMode: boolean;
+  visitCount: number;
+  onboardingDone: boolean;
+}
+
+function syncBodyDataAttributes(qualityTier: QualityTier, reducedMotion: boolean) {
+  if (typeof document === 'undefined' || !document.body) return;
+  document.body.dataset.qualityTier = qualityTier;
+  document.body.dataset.reducedMotion = reducedMotion ? 'true' : 'false';
+}
+
+function loadInitialPolaroidAlbum(legacyPolaroids: PolaroidEntry[] = []): PolaroidEntry[] {
+  if (typeof window === 'undefined') return [];
   try {
-    const raw = localStorage.getItem('dalat_profile_v1');
+    const raw = localStorage.getItem(POLAROID_ALBUM_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      const rawOutfit: PlayerOutfit = { ...DEFAULT_OUTFIT, ...(parsed.outfit || {}) };
-      const effGender = resolveEffectiveGender(rawOutfit);
-      rawOutfit.gender = effGender;
-      rawOutfit.coatStyle = ensureCoatMatchesGender(rawOutfit.coatStyle, effGender);
-      return {
-        name: typeof parsed.name === 'string' && parsed.name.trim() ? parsed.name : 'Người Săn Mây',
-        outfit: rawOutfit,
-      };
+      if (Array.isArray(parsed)) {
+        return parsed.filter((p) => p && typeof p.id === 'string').slice(0, 8);
+      }
+    }
+    if (legacyPolaroids.length > 0) {
+      const migrated = legacyPolaroids.slice(0, 6);
+      persistPolaroidAlbum(migrated);
+      return migrated;
     }
   } catch {
     // ignore storage errors
   }
-  const suffix = Math.floor(10 + Math.random() * 89);
-  return { name: `Lữ Khách #${suffix}`, outfit: { ...DEFAULT_OUTFIT } };
+  return [];
 }
 
-const initialProfile = typeof window !== 'undefined' ? loadSavedProfile() : { name: 'Lữ Khách', outfit: DEFAULT_OUTFIT };
+function persistPolaroidAlbum(items: PolaroidEntry[]): void {
+  if (typeof window === 'undefined') return;
+  const trimmed = items.slice(0, 8);
+  try {
+    localStorage.setItem(POLAROID_ALBUM_KEY, JSON.stringify(trimmed));
+  } catch {
+    try {
+      localStorage.setItem(POLAROID_ALBUM_KEY, JSON.stringify(trimmed.slice(0, 3)));
+    } catch {}
+  }
+}
+
+let legacyMigratedPolaroids: PolaroidEntry[] = [];
+
+function loadInitialPersistedState(): PersistedStateV2 {
+  const defaultReduced =
+    typeof window !== 'undefined' &&
+    (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
+
+  const fallbackSuffix = Math.floor(10 + Math.random() * 89);
+  const fallback: PersistedStateV2 = {
+    version: 2,
+    name: `Lữ Khách #${fallbackSuffix}`,
+    outfit: { ...DEFAULT_OUTFIT },
+    heldItem: 'soy_milk',
+    discoveredLandmarks: { ...DEFAULT_LANDMARKS },
+    discoveredWeathers: { golden_cloud_sea: true },
+    audioEnabled: true,
+    masterVolume: 0.65,
+    cameraSensitivity: 1.0,
+    reducedMotion: defaultReduced,
+    quietMode: false,
+    visitCount: 1,
+    onboardingDone: false,
+  };
+
+  if (typeof window === 'undefined') return fallback;
+
+  try {
+    const rawV2 = localStorage.getItem(STORAGE_KEY_V2);
+    if (rawV2) {
+      const parsed = JSON.parse(rawV2);
+      if (Array.isArray(parsed.savedPolaroids) && parsed.savedPolaroids.length > 0) {
+        legacyMigratedPolaroids = parsed.savedPolaroids.slice(0, 6);
+      }
+      const rawOutfit: PlayerOutfit = { ...DEFAULT_OUTFIT, ...(parsed.outfit || {}) };
+      const effGender = resolveEffectiveGender(rawOutfit);
+      rawOutfit.gender = effGender;
+      rawOutfit.coatStyle = ensureCoatMatchesGender(rawOutfit.coatStyle, effGender);
+
+      const nextCount = typeof parsed.visitCount === 'number' ? parsed.visitCount + 1 : 2;
+      const hydrated: PersistedStateV2 = {
+        version: 2,
+        name:
+          typeof parsed.name === 'string' && parsed.name.trim()
+            ? parsed.name.trim().slice(0, 24)
+            : fallback.name,
+        outfit: rawOutfit,
+        heldItem: typeof parsed.heldItem === 'string' ? parsed.heldItem : 'soy_milk',
+        discoveredLandmarks: {
+          ...DEFAULT_LANDMARKS,
+          ...(parsed.discoveredLandmarks || {}),
+        },
+        discoveredWeathers: {
+          golden_cloud_sea: true,
+          ...(parsed.discoveredWeathers || {}),
+        },
+        audioEnabled: typeof parsed.audioEnabled === 'boolean' ? parsed.audioEnabled : true,
+        masterVolume:
+          typeof parsed.masterVolume === 'number'
+            ? Math.max(0, Math.min(1, parsed.masterVolume))
+            : 0.65,
+        cameraSensitivity:
+          typeof parsed.cameraSensitivity === 'number'
+            ? Math.max(0.4, Math.min(1.8, parsed.cameraSensitivity))
+            : 1.0,
+        reducedMotion:
+          typeof parsed.reducedMotion === 'boolean' ? parsed.reducedMotion : defaultReduced,
+        quietMode: Boolean(parsed.quietMode),
+        visitCount: nextCount,
+        onboardingDone: Boolean(parsed.onboardingDone),
+      };
+      try {
+        localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(hydrated));
+      } catch {}
+      return hydrated;
+    }
+
+    // Migrate legacy dalat_profile_v1 seamlessly if present
+    const rawV1 = localStorage.getItem('dalat_profile_v1');
+    if (rawV1) {
+      const parsed = JSON.parse(rawV1);
+      const rawOutfit: PlayerOutfit = { ...DEFAULT_OUTFIT, ...(parsed.outfit || {}) };
+      const effGender = resolveEffectiveGender(rawOutfit);
+      rawOutfit.gender = effGender;
+      rawOutfit.coatStyle = ensureCoatMatchesGender(rawOutfit.coatStyle, effGender);
+      const migrated: PersistedStateV2 = {
+        ...fallback,
+        name:
+          typeof parsed.name === 'string' && parsed.name.trim()
+            ? parsed.name.trim().slice(0, 24)
+            : fallback.name,
+        outfit: rawOutfit,
+        visitCount: 2,
+      };
+      try {
+        localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(migrated));
+      } catch {}
+      return migrated;
+    }
+
+    try {
+      localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(fallback));
+    } catch {}
+  } catch {
+    // ignore storage errors
+  }
+
+  return fallback;
+}
+
+/**
+ * Lightweight settings/profile save (<600 bytes) — never serializes Polaroid data URLs!
+ */
+function persistSave(st: GameStoreState): void {
+  if (typeof window === 'undefined') return;
+  const payload: PersistedStateV2 = {
+    version: 2,
+    name: st.displayName,
+    outfit: st.outfit,
+    heldItem: st.heldItem,
+    discoveredLandmarks: st.discoveredLandmarks,
+    discoveredWeathers: st.discoveredWeathers,
+    audioEnabled: st.audioEnabled,
+    masterVolume: st.masterVolume,
+    cameraSensitivity: st.cameraSensitivity,
+    reducedMotion: st.reducedMotion,
+    quietMode: st.quietMode,
+    visitCount: st.visitCount,
+    onboardingDone: st.onboardingStep === 'done',
+  };
+  try {
+    localStorage.setItem(STORAGE_KEY_V2, JSON.stringify(payload));
+    localStorage.setItem(
+      'dalat_profile_v1',
+      JSON.stringify({ name: st.displayName, outfit: st.outfit })
+    );
+  } catch {
+    // ignore storage errors
+  }
+}
+
+const persistSnapshot = persistSave;
+
+const initialPersisted = loadInitialPersistedState();
+const initialPolaroidAlbum = loadInitialPolaroidAlbum(legacyMigratedPolaroids);
+const initialQualityTier: QualityTier =
+  typeof navigator !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
+    ? 'mobile'
+    : 'high';
+
+syncBodyDataAttributes(initialQualityTier, initialPersisted.reducedMotion);
 
 export const useGameStore = create<GameStoreState>((set, get) => ({
+  sceneReady: false,
   hasEnteredWorld: false,
-  displayName: initialProfile.name,
-  outfit: initialProfile.outfit,
-  heldItem: 'soy_milk',
+  visitCount: initialPersisted.visitCount,
+  onboardingStep: initialPersisted.onboardingDone ? 'done' : 'move',
+  displayName: initialPersisted.name,
+  outfit: initialPersisted.outfit,
+  heldItem: initialPersisted.heldItem,
   activeEmote: 'none',
   seatedBenchId: null,
   warmthRemainingSec: 180,
@@ -296,6 +616,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     yaw: 1.48,
     cameraYaw: -1.62,
     cameraPitch: 0.12,
+    targetCameraDistance: 4.35,
     moving: false,
     running: false,
     grounded: true,
@@ -309,45 +630,48 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     previewCurrentPanY: 0,
     previewTargetZoom: 1,
     previewCurrentZoom: 1,
+    camX: -33.5,
+    camY: 137.0,
+    camZ: 33.2,
+    cameraOccludesSelf: false,
   },
   teleportTarget: null,
 
-  // Start initial preview in the magical pre-sunrise window if not yet synced, then sync seamlessly!
   atmosphere: computeWorldAtmosphere(Date.now(), null, null),
   overrideGameHour: null,
   overrideWeather: null,
-  qualityTier:
-    typeof navigator !== 'undefined' && /iPhone|iPad|iPod|Android/i.test(navigator.userAgent)
-      ? 'mobile'
-      : 'high',
+  qualityTier: initialQualityTier,
   autoQuality: true,
-  audioEnabled: true,
-  masterVolume: 0.65,
+  audioEnabled: initialPersisted.audioEnabled,
+  masterVolume: initialPersisted.masterVolume,
+  cameraSensitivity: initialPersisted.cameraSensitivity,
+  reducedMotion: initialPersisted.reducedMotion,
+  quietMode: initialPersisted.quietMode,
 
   chatBubbles: [],
+  chatHistory: [],
+  unreadChatCount: 0,
+  chatDrawerOpen: false,
   polaroids: [],
+  capturedPolaroids: initialPolaroidAlbum,
   windChimeNotes: [],
   lastJamNote: null,
-  discoveredLandmarks: {
-    'quan-mo-suong': true,
-    'cau-go-san-may': false,
-    'cay-thong-co-don': false,
-    'dai-ngam-den': false,
-    'gac-che-1927': false,
-  },
-  discoveredWeathers: { golden_cloud_sea: true },
+  discoveredLandmarks: initialPersisted.discoveredLandmarks,
+  discoveredWeathers: initialPersisted.discoveredWeathers,
 
   activeModal: 'none',
   photoModeActive: false,
   photoFocalMm: 35,
   photoFilter: 'kodak_dawn',
   photoHideCrowd: false,
+  photoIncludeInviteCode: true,
   photoCountdown: 0,
   photoShutterNonce: 0,
   latestCapturedPolaroid: null,
   nearbyPrompt: null,
   nearbyPeer: null,
   selectedPeerSessionId: null,
+  dismissedPeerId: null,
   incomingSocialPrompt: null,
   previewYawOffset: 0,
   isDraggingPreview: false,
@@ -361,12 +685,28 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     textures: 0,
     geometries: 0,
   },
+  uxMetrics: {
+    mountedAtMs: typeof performance !== 'undefined' ? Math.round(performance.now()) : 0,
+    enteredWorldAtMs: null,
+    timeToEnterMs: null,
+    firstWalkAtMs: null,
+    firstOrbitAtMs: null,
+    timeToControlsSec: null,
+    mapFastTravels: 0,
+    friendTeleports: 0,
+    contextInteractions: 0,
+    socialInteractions: 0,
+    inviteCopies: 0,
+    photosCaptured: 0,
+  },
+
+  markSceneReady: () => {
+    if (!get().sceneReady) set({ sceneReady: true });
+  },
 
   setDisplayName: (displayName) => {
     set({ displayName });
-    try {
-      localStorage.setItem('dalat_profile_v1', JSON.stringify({ name: displayName, outfit: get().outfit }));
-    } catch {}
+    persistSnapshot(get());
   },
 
   updateOutfit: (partial) => {
@@ -383,22 +723,26 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     if (partial.bagStyle !== undefined) {
       next.backpack = partial.bagStyle !== 'none';
     } else if (partial.backpack !== undefined) {
-      next.bagStyle = partial.backpack ? cur.bagStyle && cur.bagStyle !== 'none' ? cur.bagStyle : 'trek_pack' : 'none';
+      next.bagStyle = partial.backpack
+        ? cur.bagStyle && cur.bagStyle !== 'none'
+          ? cur.bagStyle
+          : 'trek_pack'
+        : 'none';
     }
     set({ outfit: next });
-    try {
-      localStorage.setItem('dalat_profile_v1', JSON.stringify({ name: get().displayName, outfit: next }));
-    } catch {}
+    persistSnapshot(get());
   },
 
   enterWorld: () =>
     set((s) => {
-      // Prevent spawning directly on top of another player on the veranda deck
       for (let attempt = 0; attempt < 8; attempt++) {
         let tooClose = false;
         for (const peerId in s.peers) {
           const peer = s.peers[peerId];
-          if (peer && Math.hypot(peer.x - s.localTransient.x, peer.z - s.localTransient.z) < 1.15) {
+          if (
+            peer &&
+            Math.hypot(peer.x - s.localTransient.x, peer.z - s.localTransient.z) < 1.15
+          ) {
             tooClose = true;
             break;
           }
@@ -410,7 +754,6 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
         s.localTransient.y = sampleWalkableHeight(s.localTransient.x, s.localTransient.z);
       }
 
-      // Face East toward the Volumetric Cloud Sea & Sunrise upon stepping into the world!
       s.localTransient.yaw = 1.48;
       s.localTransient.cameraYaw = -1.66;
       s.localTransient.cameraPitch = 0.11;
@@ -421,9 +764,28 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       s.localTransient.previewCurrentPanY = 0;
       s.localTransient.previewTargetZoom = 1;
       s.localTransient.previewCurrentZoom = 1;
-      return { hasEnteredWorld: true, activeModal: 'none', previewYawOffset: 0, isDraggingPreview: false };
+
+      const nowPerf = typeof performance !== 'undefined' ? Math.round(performance.now()) : 0;
+      const nextMetrics: UXSessionMetrics = {
+        ...s.uxMetrics,
+        enteredWorldAtMs: s.uxMetrics.enteredWorldAtMs ?? nowPerf,
+        timeToEnterMs:
+          s.uxMetrics.timeToEnterMs ?? Math.max(0, nowPerf - s.uxMetrics.mountedAtMs),
+      };
+
+      return {
+        hasEnteredWorld: true,
+        activeModal: 'none',
+        previewYawOffset: 0,
+        isDraggingPreview: false,
+        uxMetrics: nextMetrics,
+      };
     }),
-  setHeldItem: (heldItem) => set({ heldItem }),
+
+  setHeldItem: (heldItem) => {
+    set({ heldItem });
+    persistSnapshot(get());
+  },
   triggerEmote: (activeEmote) => set({ activeEmote }),
   setSeatedBench: (seatedBenchId) => set({ seatedBenchId }),
 
@@ -442,9 +804,10 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
         ? st.chatBubbles.filter((b) => nowMs - b.timestamp <= 8500)
         : st.chatBubbles;
 
-    const weatherSeen = st.discoveredWeathers[nextAtmo.weather]
-      ? st.discoveredWeathers
-      : { ...st.discoveredWeathers, [nextAtmo.weather]: true };
+    const isNewWeather = !st.discoveredWeathers[nextAtmo.weather];
+    const weatherSeen = isNewWeather
+      ? { ...st.discoveredWeathers, [nextAtmo.weather]: true }
+      : st.discoveredWeathers;
 
     set({
       atmosphere: nextAtmo,
@@ -452,10 +815,17 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       chatBubbles: filteredBubbles,
       discoveredWeathers: weatherSeen,
     });
+
+    if (isNewWeather) {
+      persistSnapshot(get());
+    }
   },
 
   teleportTo: (position, lookAt) => {
     const st = get();
+    if (st.seatedBenchId) {
+      getNetController().requestBenchSeat(null);
+    }
     const floorY = sampleWalkableHeight(position[0], position[2]);
     const targetY = Number.isFinite(position[1]) ? position[1] : floorY;
     st.localTransient.x = position[0];
@@ -485,9 +855,42 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   teleportToLandmark: (id) => {
     const lm = LANDMARKS[id];
     if (!lm) return;
+    const net = getNetController();
+    if (get().seatedBenchId) {
+      net.requestBenchSeat(null);
+    }
     get().teleportTo(lm.position, lm.lookAt);
+    const lt = get().localTransient;
+    net.sendTeleport?.(lt.x, lt.z, lt.yaw);
     get().markLandmarkDiscovered(id);
-    set({ activeModal: 'none' });
+    set((s) => ({
+      activeModal: 'none',
+      uxMetrics: { ...s.uxMetrics, mapFastTravels: s.uxMetrics.mapFastTravels + 1 },
+    }));
+  },
+
+  teleportToPeer: (sessionId) => {
+    const st = get();
+    const peer = st.peers[sessionId];
+    if (!peer) return false;
+    const net = getNetController();
+    if (st.seatedBenchId) {
+      net.requestBenchSeat(null);
+    }
+    const angle = (peer.yaw || 0) + Math.PI * 0.35;
+    const arriveX = peer.x + Math.sin(angle) * 1.65;
+    const arriveZ = peer.z + Math.cos(angle) * 1.65;
+    const arriveY = sampleWalkableHeight(arriveX, arriveZ);
+    st.teleportTo([arriveX, arriveY, arriveZ], [peer.x, peer.y + 1.25, peer.z]);
+    const lt = get().localTransient;
+    net.sendTeleport?.(lt.x, lt.z, lt.yaw);
+    set((s) => ({
+      activeModal: 'none',
+      dismissedPeerId: null,
+      uxMetrics: { ...s.uxMetrics, friendTeleports: s.uxMetrics.friendTeleports + 1 },
+    }));
+    st.showToast(`🛵 Đã ghé tới cạnh ${peer.displayName}!`);
+    return true;
   },
 
   setOverrideAtmosphere: (overrideGameHour, overrideWeather) => {
@@ -499,9 +902,38 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     });
   },
 
-  setQualityTier: (qualityTier, auto = false) => set({ qualityTier, autoQuality: auto }),
-  setAudioEnabled: (audioEnabled) => set({ audioEnabled }),
-  setMasterVolume: (masterVolume) => set({ masterVolume }),
+  setQualityTier: (qualityTier, auto = false) => {
+    syncBodyDataAttributes(qualityTier, get().reducedMotion);
+    set({ qualityTier, autoQuality: auto });
+  },
+
+  setAudioEnabled: (audioEnabled) => {
+    set({ audioEnabled });
+    persistSnapshot(get());
+  },
+
+  setMasterVolume: (masterVolume) => {
+    set({ masterVolume });
+    persistSnapshot(get());
+  },
+
+  setCameraSensitivity: (v) => {
+    const cameraSensitivity = Math.max(0.4, Math.min(1.8, v));
+    set({ cameraSensitivity });
+    persistSnapshot(get());
+  },
+
+  setReducedMotion: (reducedMotion) => {
+    syncBodyDataAttributes(get().qualityTier, reducedMotion);
+    set({ reducedMotion });
+    persistSnapshot(get());
+  },
+
+  setQuietMode: (quietMode) => {
+    set({ quietMode });
+    persistSnapshot(get());
+  },
+
   setActiveModal: (activeModal) =>
     set((s) => {
       if (activeModal === 'wardrobe') {
@@ -519,15 +951,103 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
         isDraggingPreview: false,
       };
     }),
+
+  setChatDrawerOpen: (chatDrawerOpen) =>
+    set((s) => ({
+      chatDrawerOpen,
+      unreadChatCount: chatDrawerOpen ? 0 : s.unreadChatCount,
+    })),
+
+  clearUnreadChat: () => set({ unreadChatCount: 0 }),
+
   setPhotoMode: (photoModeActive) =>
-    set({ photoModeActive, activeModal: 'none', latestCapturedPolaroid: photoModeActive ? get().latestCapturedPolaroid : null }),
+    set({
+      photoModeActive,
+      activeModal: 'none',
+      chatDrawerOpen: false,
+      latestCapturedPolaroid: photoModeActive ? get().latestCapturedPolaroid : null,
+    }),
+
   setPhotoOptions: (opts) => set(opts),
-  requestPhotoShutter: () => set((s) => ({ photoShutterNonce: s.photoShutterNonce + 1 })),
-  setLatestCapturedPolaroid: (latestCapturedPolaroid) => set({ latestCapturedPolaroid }),
+
+  requestPhotoShutter: () =>
+    set((s) => ({
+      photoShutterNonce: s.photoShutterNonce + 1,
+      uxMetrics: { ...s.uxMetrics, photosCaptured: s.uxMetrics.photosCaptured + 1 },
+    })),
+
+  setLatestCapturedPolaroid: (latestCapturedPolaroid) => {
+    if (!latestCapturedPolaroid) {
+      set({ latestCapturedPolaroid: null });
+      return;
+    }
+    set((s) => {
+      const isLocal = latestCapturedPolaroid.id.startsWith('local-pol-');
+      const nextPolaroids = s.polaroids.map((p) =>
+        p.id === latestCapturedPolaroid.id ? latestCapturedPolaroid : p
+      );
+      const nextCaptured = isLocal
+        ? s.capturedPolaroids.some((p) => p.id === latestCapturedPolaroid.id)
+          ? s.capturedPolaroids.map((p) =>
+              p.id === latestCapturedPolaroid.id ? latestCapturedPolaroid : p
+            )
+          : [latestCapturedPolaroid, ...s.capturedPolaroids].slice(0, 8)
+        : s.capturedPolaroids;
+      if (isLocal && nextCaptured !== s.capturedPolaroids) {
+        persistPolaroidAlbum(nextCaptured);
+      }
+      return {
+        latestCapturedPolaroid,
+        polaroids: nextPolaroids,
+        capturedPolaroids: nextCaptured,
+      };
+    });
+  },
+
   setNearbyPrompt: (nearbyPrompt) => set({ nearbyPrompt }),
-  setNearbyPeer: (nearbyPeer) => set({ nearbyPeer }),
-  setSelectedPeer: (selectedPeerSessionId) => set({ selectedPeerSessionId }),
-  setIncomingSocialPrompt: (incomingSocialPrompt) => set({ incomingSocialPrompt }),
+
+  setNearbyPeer: (nearbyPeer) =>
+    set((s) => {
+      let nextDismissed = s.dismissedPeerId;
+      if (nextDismissed) {
+        const dp = s.peers[nextDismissed];
+        if (!dp) {
+          nextDismissed = null;
+        } else {
+          const distToDismissed = Math.hypot(
+            dp.x - s.localTransient.x,
+            dp.z - s.localTransient.z
+          );
+          if (distToDismissed > 12.0) {
+            nextDismissed = null;
+          }
+        }
+      }
+      return { nearbyPeer, dismissedPeerId: nextDismissed };
+    }),
+
+  setSelectedPeer: (selectedPeerSessionId) =>
+    set((s) => ({
+      selectedPeerSessionId,
+      dismissedPeerId:
+        selectedPeerSessionId && selectedPeerSessionId === s.dismissedPeerId
+          ? null
+          : s.dismissedPeerId,
+    })),
+
+  dismissPeerPrompt: (sessionId) =>
+    set({
+      dismissedPeerId: sessionId,
+      selectedPeerSessionId: null,
+      incomingSocialPrompt: null,
+    }),
+
+  setIncomingSocialPrompt: (incomingSocialPrompt) =>
+    set((s) => ({
+      incomingSocialPrompt,
+      dismissedPeerId: incomingSocialPrompt ? null : s.dismissedPeerId,
+    })),
+
   setPreviewYawOffset: (previewYawOffset) =>
     set((s) => {
       const cur = s.localTransient.previewCurrentYaw;
@@ -540,12 +1060,15 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       s.localTransient.previewYawVel = 0;
       return { previewYawOffset: nextTarget };
     }),
+
   addPreviewYawOffset: (deltaYaw) => {
     const lt = get().localTransient;
     lt.previewTargetYaw += deltaYaw;
     set({ previewYawOffset: lt.previewTargetYaw });
   },
+
   setIsDraggingPreview: (isDraggingPreview) => set({ isDraggingPreview }),
+
   resetPreviewStage: () =>
     set((s) => {
       const cur = s.localTransient.previewCurrentYaw;
@@ -557,6 +1080,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       s.localTransient.previewTargetZoom = 1;
       return { previewYawOffset: nextTarget, isDraggingPreview: false };
     }),
+
   triggerSocialSparkle: (kind, x, y, z) =>
     set({
       socialSparkleBurst: {
@@ -583,7 +1107,66 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     set((s) => ({
       discoveredLandmarks: { ...s.discoveredLandmarks, [id]: true },
     }));
+    persistSnapshot(get());
   },
+
+  advanceOnboarding: (action) => {
+    const st = get();
+    const nowPerf = typeof performance !== 'undefined' ? Math.round(performance.now()) : 0;
+    let metricsChanged = false;
+    const nextMetrics = { ...st.uxMetrics };
+
+    if (action === 'move' && nextMetrics.firstWalkAtMs === null) {
+      nextMetrics.firstWalkAtMs = nowPerf;
+      metricsChanged = true;
+    }
+    if (action === 'look' && nextMetrics.firstOrbitAtMs === null) {
+      nextMetrics.firstOrbitAtMs = nowPerf;
+      metricsChanged = true;
+    }
+    if (
+      nextMetrics.timeToControlsSec === null &&
+      nextMetrics.enteredWorldAtMs !== null &&
+      nextMetrics.firstWalkAtMs !== null &&
+      nextMetrics.firstOrbitAtMs !== null
+    ) {
+      nextMetrics.timeToControlsSec =
+        Math.round(
+          (Math.max(nextMetrics.firstWalkAtMs, nextMetrics.firstOrbitAtMs) -
+            nextMetrics.enteredWorldAtMs) /
+            100
+        ) / 10;
+      metricsChanged = true;
+    }
+
+    let nextStep = st.onboardingStep;
+    if (action === 'skip') {
+      nextStep = 'done';
+    } else if (st.onboardingStep === 'move' && action === 'move') {
+      nextStep = 'look';
+    } else if (st.onboardingStep === 'look' && action === 'look') {
+      nextStep = 'interact';
+    } else if (st.onboardingStep === 'interact' && action === 'interact') {
+      nextStep = 'done';
+    }
+
+    if (nextStep !== st.onboardingStep || metricsChanged) {
+      set({ onboardingStep: nextStep, uxMetrics: nextMetrics });
+      if (nextStep === 'done' && st.onboardingStep !== 'done') {
+        persistSnapshot(get());
+      }
+    }
+  },
+
+  recordUXEvent: (kind) =>
+    set((s) => {
+      const m = { ...s.uxMetrics };
+      if (kind === 'context_interact') m.contextInteractions += 1;
+      if (kind === 'social_interact') m.socialInteractions += 1;
+      if (kind === 'invite_copy') m.inviteCopies += 1;
+      if (kind === 'photo_capture') m.photosCaptured += 1;
+      return { uxMetrics: m };
+    }),
 
   setPerfMetrics: (perfMetrics) => set({ perfMetrics }),
 
@@ -601,14 +1184,77 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   resetPeers: () => set({ peers: {}, farBeacons: [] }),
   setFarBeacons: (farBeacons) => set({ farBeacons }),
   pushChatBubble: (msg) =>
-    set((s) => ({
-      chatBubbles: [...s.chatBubbles.slice(-24), msg],
-    })),
-  setPolaroids: (polaroids) => set({ polaroids }),
-  prependPolaroid: (item) =>
-    set((s) => ({
-      polaroids: [item, ...s.polaroids.filter((p) => p.id !== item.id)].slice(0, 24),
-    })),
+    set((s) => {
+      const isFromMe =
+        msg.senderId === (s.localSessionId || 'local') || msg.senderId === 'local';
+      const isBotSender = Boolean(s.peers[msg.senderId]?.isBot);
+      const entry: ChatLogEntry = {
+        ...msg,
+        landmarkShort: resolveNearestShortLandmark(msg.x, msg.z),
+      };
+      const shouldIncrementUnread = !isFromMe && !isBotSender && !s.chatDrawerOpen;
+      return {
+        chatBubbles: [...s.chatBubbles.slice(-24), msg],
+        chatHistory: [...s.chatHistory.slice(-29), entry],
+        unreadChatCount: shouldIncrementUnread ? s.unreadChatCount + 1 : s.unreadChatCount,
+      };
+    }),
+  setPolaroids: (polaroids) =>
+    set(() => {
+      const seenIds = new Set<string>();
+      const seenImages = new Set<string>();
+      const deduped: PolaroidEntry[] = [];
+      for (const p of polaroids) {
+        if (!p || !p.id) continue;
+        const imgKey = p.imageDataUrl && p.imageDataUrl.length > 200 ? p.imageDataUrl : '';
+        if (seenIds.has(p.id) || (imgKey && seenImages.has(imgKey))) continue;
+        seenIds.add(p.id);
+        if (imgKey) seenImages.add(imgKey);
+        deduped.push(p);
+        if (deduped.length >= 24) break;
+      }
+      return { polaroids: deduped };
+    }),
+  prependPolaroid: (item) => {
+    let updatedCaptured: PolaroidEntry[] | null = null;
+    set((s) => {
+      const itemImgKey =
+        item.imageDataUrl && item.imageDataUrl.length > 200 ? item.imageDataUrl : '';
+      const nextPolaroids = [
+        item,
+        ...s.polaroids.filter(
+          (p) => p.id !== item.id && (!itemImgKey || p.imageDataUrl !== itemImgKey)
+        ),
+      ].slice(0, 24);
+
+      if (
+        itemImgKey &&
+        s.capturedPolaroids.some((p) => p.imageDataUrl === itemImgKey && p.id !== item.id)
+      ) {
+        updatedCaptured = s.capturedPolaroids.map((p) =>
+          p.imageDataUrl === itemImgKey ? { ...p, id: item.id } : p
+        );
+        return {
+          polaroids: nextPolaroids,
+          capturedPolaroids: updatedCaptured,
+        };
+      }
+      return { polaroids: nextPolaroids };
+    });
+    if (updatedCaptured) {
+      persistPolaroidAlbum(updatedCaptured);
+    }
+  },
+  saveCapturedPolaroid: (item) => {
+    let updatedCaptured: PolaroidEntry[] | null = null;
+    set((s) => {
+      updatedCaptured = [item, ...s.capturedPolaroids.filter((p) => p.id !== item.id)].slice(0, 8);
+      return { capturedPolaroids: updatedCaptured };
+    });
+    if (updatedCaptured) {
+      persistPolaroidAlbum(updatedCaptured);
+    }
+  },
   setWindChimeNotes: (windChimeNotes) => set({ windChimeNotes }),
   prependWindChimeNote: (note) =>
     set((s) => ({
@@ -616,4 +1262,3 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     })),
   setLastJamNote: (lastJamNote) => set({ lastJamNote }),
 }));
-

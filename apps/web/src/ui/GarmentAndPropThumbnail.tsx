@@ -18,6 +18,7 @@ import {
 } from '@dalat/protocol';
 import {
   getCachedStudioThumbnail,
+  prewarmHudPropThumbnails,
   renderBagStudioThumbnail,
   renderCoatStudioThumbnail,
   renderEyewearStudioThumbnail,
@@ -28,20 +29,20 @@ import {
 import { UI_COLORS } from './uiStyles';
 
 function useStudioThumb(
+  key: string,
   producer: () => { key: string; promise: Promise<string> },
   deps: React.DependencyList
 ): string {
-  const initialKey = producer().key;
-  const [url, setUrl] = useState<string>(() => getCachedStudioThumbnail(initialKey) || '');
+  const [url, setUrl] = useState<string>(() => getCachedStudioThumbnail(key) || '');
 
   useEffect(() => {
     let alive = true;
-    const { key, promise } = producer();
     const cached = getCachedStudioThumbnail(key);
     if (cached) {
       setUrl(cached);
       return;
     }
+    const { promise } = producer();
     void promise.then((res) => {
       if (alive && res) setUrl(res);
     });
@@ -51,8 +52,10 @@ function useStudioThumb(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
-  return url;
+  return getCachedStudioThumbnail(key) || url;
 }
+
+export { prewarmHudPropThumbnails };
 
 function StudioImageFrame(props: { src: string; size: number; alt?: string }) {
   const { src, size, alt = '' } = props;
@@ -137,7 +140,9 @@ export function CoatThumbnail(props: {
   size?: number;
 }) {
   const { styleId, coatColor, scarfColor, size = 58 } = props;
+  const key = `coat|${styleId}|${coatColor}|${scarfColor}`;
   const src = useStudioThumb(
+    key,
     () => renderCoatStudioThumbnail(styleId, coatColor, scarfColor),
     [styleId, coatColor, scarfColor]
   );
@@ -160,7 +165,11 @@ export function HeadwearThumbnail(props: {
     gender = 'female',
     size = 54,
   } = props;
+  const effId: HeadwearId = headwearId === 'scarf_only' ? 'none' : headwearId;
+  const rigKey = effId === 'none' || effId === 'beanie' || effId === 'beret' ? gender : 'any';
+  const key = `head|${effId}|${rigKey}|${coatColor}|${scarfColor}|${hairColor}`;
   const src = useStudioThumb(
+    key,
     () => renderHeadwearStudioThumbnail(headwearId, coatColor, scarfColor, hairColor, gender),
     [headwearId, coatColor, scarfColor, hairColor, gender]
   );
@@ -173,7 +182,9 @@ export function NeckwearThumbnail(props: {
   size?: number;
 }) {
   const { neckwearId, scarfColor, size = 54 } = props;
+  const key = neckwearId === 'none' ? 'neck|none' : `neck|${neckwearId}|${scarfColor}`;
   const src = useStudioThumb(
+    key,
     () => renderNeckwearStudioThumbnail(neckwearId, scarfColor),
     [neckwearId, scarfColor]
   );
@@ -183,7 +194,8 @@ export function NeckwearThumbnail(props: {
 
 export function EyewearThumbnail(props: { eyewearId: EyewearId; size?: number }) {
   const { eyewearId, size = 54 } = props;
-  const src = useStudioThumb(() => renderEyewearStudioThumbnail(eyewearId), [eyewearId]);
+  const key = eyewearId === 'none' ? 'eye|none' : `eye|${eyewearId}`;
+  const src = useStudioThumb(key, () => renderEyewearStudioThumbnail(eyewearId), [eyewearId]);
   if (eyewearId === 'none') return <MinimalNoneBadge size={size} />;
   return <StudioImageFrame src={src} size={size} />;
 }
@@ -195,7 +207,9 @@ export function BagThumbnail(props: {
   size?: number;
 }) {
   const { bagId, coatColor = '#C87D55', scarfColor = '#E8D5B7', size = 54 } = props;
+  const key = bagId === 'none' ? 'bag|none' : `bag|${bagId}|${coatColor}|${scarfColor}`;
   const src = useStudioThumb(
+    key,
     () => renderBagStudioThumbnail(bagId, coatColor, scarfColor),
     [bagId, coatColor, scarfColor]
   );
@@ -205,7 +219,8 @@ export function BagThumbnail(props: {
 
 export function HeldPropThumbnail(props: { itemId: HeldItemId; size?: number }) {
   const { itemId, size = 50 } = props;
-  const src = useStudioThumb(() => renderHeldPropStudioThumbnail(itemId), [itemId]);
+  const key = itemId === 'none' ? 'prop|none' : `prop|${itemId}`;
+  const src = useStudioThumb(key, () => renderHeldPropStudioThumbnail(itemId), [itemId]);
   if (itemId === 'none') return <MinimalNoneBadge size={size} />;
   return <StudioImageFrame src={src} size={size} />;
 }
@@ -253,9 +268,250 @@ export function pickRandomHighlandLook(preferredGender?: AvatarGender): {
   };
 }
 
+export interface CuratedDalatPreset {
+  id: string;
+  title: string;
+  subtitle: string;
+  outfit: PlayerOutfit;
+  heldItem: HeldItemId;
+}
+
+export const CURATED_DALAT_PRESETS: Record<AvatarGender, ReadonlyArray<CuratedDalatPreset>> = {
+  female: [
+    {
+      id: 'f-suong-som',
+      title: 'Sương Sớm Mơ Sương',
+      subtitle: 'Măng-tô dạ • Sữa đậu nành',
+      outfit: {
+        gender: 'female',
+        coatStyle: 'wool_trench',
+        coatColor: '#C87D55',
+        scarfColor: '#E8D5B7',
+        headwear: 'beanie',
+        neckwear: 'knit_scarf',
+        eyewear: 'none',
+        bagStyle: 'trek_pack',
+        hairColor: '#231B18',
+        backpack: true,
+      },
+      heldItem: 'soy_milk',
+    },
+    {
+      id: 'f-doi-che',
+      title: 'Thơ Mộng Đồi Chè',
+      subtitle: 'Choàng cừu • Hoa Tú Cầu',
+      outfit: {
+        gender: 'female',
+        coatStyle: 'sherpa_cape',
+        coatColor: '#D8CBB8',
+        scarfColor: '#9E8AC4',
+        headwear: 'beret',
+        neckwear: 'plaid_shawl',
+        eyewear: 'round_vintage',
+        bagStyle: 'rattan_basket',
+        hairColor: '#4A3326',
+        backpack: true,
+      },
+      heldItem: 'hydrangea_bouquet',
+    },
+    {
+      id: 'f-da-quy',
+      title: 'Nắng Sớm Dã Quỳ',
+      subtitle: 'Gile cổ nơ • Máy ảnh 35mm',
+      outfit: {
+        gender: 'female',
+        coatStyle: 'cardigan_vest',
+        coatColor: '#D9A441',
+        scarfColor: '#F2E9E4',
+        headwear: 'flower_crown',
+        neckwear: 'camera_strap',
+        eyewear: 'sun_amber',
+        bagStyle: 'canvas_tote',
+        hairColor: '#6E4730',
+        backpack: true,
+      },
+      heldItem: 'film_camera',
+    },
+    {
+      id: 'f-du-ca',
+      title: 'Đêm Thông Du Ca',
+      subtitle: 'Poncho thổ cẩm • Đèn bão',
+      outfit: {
+        gender: 'female',
+        coatStyle: 'highland_poncho',
+        coatColor: '#4A6B5D',
+        scarfColor: '#C94A38',
+        headwear: 'cat_beanie',
+        neckwear: 'knit_scarf',
+        eyewear: 'blush_cheeks',
+        bagStyle: 'guitar_case',
+        hairColor: '#2C3545',
+        backpack: true,
+      },
+      heldItem: 'lantern',
+    },
+  ],
+  male: [
+    {
+      id: 'm-san-may',
+      title: 'Săn Mây Cầu Gỗ',
+      subtitle: 'Khoác gió • Phin cà phê',
+      outfit: {
+        gender: 'male',
+        coatStyle: 'puffer_vest',
+        coatColor: '#4A6B5D',
+        scarfColor: '#E8D5B7',
+        headwear: 'beanie',
+        neckwear: 'knit_scarf',
+        eyewear: 'none',
+        bagStyle: 'trek_pack',
+        hairColor: '#231B18',
+        backpack: true,
+      },
+      heldItem: 'phin_coffee',
+    },
+    {
+      id: 'm-nhiep-anh',
+      title: 'Nhiếp Ảnh Phố Núi',
+      subtitle: 'Măng-tô Tweed • Máy 35mm',
+      outfit: {
+        gender: 'male',
+        coatStyle: 'tweed_overcoat',
+        coatColor: '#7C6A56',
+        scarfColor: '#E09F3E',
+        headwear: 'fedora_wool',
+        neckwear: 'camera_strap',
+        eyewear: 'round_vintage',
+        bagStyle: 'leather_satchel',
+        hairColor: '#4A3326',
+        backpack: true,
+      },
+      heldItem: 'film_camera',
+    },
+    {
+      id: 'm-du-muc',
+      title: 'Du Ca Thông Cô Đơn',
+      subtitle: 'Poncho nam • Đàn Guitar',
+      outfit: {
+        gender: 'male',
+        coatStyle: 'vintage_poncho',
+        coatColor: '#3B526B',
+        scarfColor: '#C94A38',
+        headwear: 'bucket_hat',
+        neckwear: 'bandana',
+        eyewear: 'sun_amber',
+        bagStyle: 'guitar_case',
+        hairColor: '#2C3545',
+        backpack: true,
+      },
+      heldItem: 'guitar',
+    },
+    {
+      id: 'm-suong-dem',
+      title: 'Lửa Trại Sương Đêm',
+      subtitle: 'Parka khuy sừng • Đèn bão',
+      outfit: {
+        gender: 'male',
+        coatStyle: 'duffle_parka',
+        coatColor: '#C87D55',
+        scarfColor: '#355849',
+        headwear: 'beret',
+        neckwear: 'plaid_shawl',
+        eyewear: 'retro_tortoise',
+        bagStyle: 'trek_pack',
+        hairColor: '#6E4730',
+        backpack: true,
+      },
+      heldItem: 'lantern',
+    },
+  ],
+};
+
+function isLightHex(hex: string): boolean {
+  const clean = hex.replace('#', '');
+  if (clean.length !== 6) return false;
+  const r = parseInt(clean.slice(0, 2), 16) || 0;
+  const g = parseInt(clean.slice(2, 4), 16) || 0;
+  const b = parseInt(clean.slice(4, 6), 16) || 0;
+  return 0.299 * r + 0.587 * g + 0.114 * b > 155;
+}
+
+/**
+ * Accessible color swatch button with generous touch hit area (>=36px desktop / >=42px touch)
+ * and a high-contrast central checkmark icon so selection never relies on color alone.
+ */
+export function ColorSwatchButton(props: {
+  hex: string;
+  selected: boolean;
+  onClick: () => void;
+  label?: string;
+  touchMode?: boolean;
+}) {
+  const { hex, selected, onClick, label, touchMode = false } = props;
+  const light = isLightHex(hex);
+  const hitSize = touchMode ? 44 : 36;
+  const circleSize = touchMode ? 26 : 24;
+
+  return (
+    <button
+      type="button"
+      aria-label={label || `Màu ${hex}`}
+      aria-pressed={selected}
+      title={label || hex}
+      onClick={onClick}
+      className="dalat-glass-btn"
+      style={{
+        width: `${hitSize}px`,
+        height: `${hitSize}px`,
+        minWidth: `${hitSize}px`,
+        minHeight: `${hitSize}px`,
+        padding: 0,
+        boxSizing: 'border-box',
+        borderRadius: '11px',
+        background: selected ? 'rgba(243, 195, 130, 0.18)' : 'rgba(255, 255, 255, 0.03)',
+        border: selected
+          ? `1.5px solid ${UI_COLORS.warmAmber}`
+          : '1px solid rgba(255, 232, 204, 0.14)',
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        flexShrink: 0,
+      }}
+    >
+      <span
+        style={{
+          width: `${circleSize}px`,
+          height: `${circleSize}px`,
+          borderRadius: '50%',
+          background: hex,
+          border: selected ? '2px solid #FFF8EE' : '1.5px solid rgba(255, 255, 255, 0.28)',
+          boxShadow: selected
+            ? '0 0 0 2px rgba(15, 22, 34, 0.75), 0 3px 8px rgba(0,0,0,0.45)'
+            : '0 2px 5px rgba(0,0,0,0.32)',
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+        }}
+      >
+        {selected && (
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+            <path
+              d="M3.5 8.4L6.6 11.4L12.6 4.8"
+              stroke={light ? '#18202C' : '#FFFDF9'}
+              strokeWidth="2.3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+          </svg>
+        )}
+      </span>
+    </button>
+  );
+}
+
 /**
  * Reusable visual item card: renders the 1:1 3D WebGL studio thumbnail on top
- * and the Vietnamese item name (plus optional micro-subtitle) underneath.
+ * and the Vietnamese item name (plus optional subtitle) underneath (>=12px WCAG legible).
  */
 export function VisualChoiceCard(props: {
   active: boolean;
@@ -281,6 +537,7 @@ export function VisualChoiceCard(props: {
   return (
     <button
       type="button"
+      aria-pressed={active}
       title={title || label}
       onClick={onClick}
       className="dalat-glass-btn"
@@ -289,7 +546,7 @@ export function VisualChoiceCard(props: {
         borderRadius: compact ? '12px' : '14px',
         background: active
           ? 'linear-gradient(180deg, rgba(243, 195, 130, 0.25) 0%, rgba(243, 195, 130, 0.11) 100%)'
-          : 'rgba(255, 255, 255, 0.04)',
+          : 'rgba(255, 255, 255, 0.045)',
         border: `1px solid ${active ? UI_COLORS.warmAmber : UI_COLORS.border}`,
         boxShadow: active ? '0 4px 14px rgba(243, 195, 130, 0.18)' : 'none',
         color: active ? UI_COLORS.warmAmber : UI_COLORS.cream,
@@ -300,6 +557,9 @@ export function VisualChoiceCard(props: {
         gap: compact ? '4px' : '5px',
         textAlign: 'center',
         width: '100%',
+        maxWidth: '100%',
+        minWidth: 0,
+        boxSizing: 'border-box',
       }}
     >
       <div
@@ -322,9 +582,9 @@ export function VisualChoiceCard(props: {
 
       <span
         style={{
-          fontSize: compact ? '10.5px' : '11.5px',
+          fontSize: '12px',
           fontWeight: active ? 600 : 500,
-          lineHeight: 1.2,
+          lineHeight: 1.25,
           color: active ? UI_COLORS.warmAmber : UI_COLORS.cream,
           display: 'block',
           width: '100%',
@@ -339,8 +599,8 @@ export function VisualChoiceCard(props: {
       {subtitle && (
         <span
           style={{
-            fontSize: '9.5px',
-            lineHeight: 1.15,
+            fontSize: '12px',
+            lineHeight: 1.2,
             color: UI_COLORS.mistText,
             display: 'block',
             width: '100%',

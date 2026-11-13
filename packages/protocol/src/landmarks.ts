@@ -73,9 +73,9 @@ export const LANDMARKS: Record<LandmarkId, LandmarkSpec> = {
     'dai-ngam-den',
     'Đài Ngắm Thung Lũng Đèn & Dốc Dã Quỳ',
     'Rìa sương sớm bên xe Super Cub 50 nhìn xuống biển đèn vàng nhà lồng Thái Phiên',
-    17.2,
-    128.5,
-    [235, 32, 146],
+    21.6,
+    125.8,
+    [195, 24, 108],
     '04:15 – 05:15 AM (Trước rạng đông)'
   ),
   'gac-che-1927': makeLandmark(

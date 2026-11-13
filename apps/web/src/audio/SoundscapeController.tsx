@@ -1,41 +1,29 @@
 import { useEffect, useRef } from 'react';
-import { AcousticJamNote } from '@dalat/protocol';
 import { useGameStore } from '../store/gameStore';
+import {
+  GUITAR_CHORDS,
+  playHighlandJamChord,
+  registerHighlandAudioEngine,
+  stopAllTransientSources,
+  trackTransientSource,
+  type WebAudioEngine,
+} from './highlandAudio';
 
 const CAMPFIRE_POS: readonly [number, number, number] = [-53, 135, 24];
-
-// 6-chord Da Lat major-pentatonic / warm highland acoustic progression:
-// 0: Fmaj7, 1: G6, 2: Em7, 3: Am9, 4: Dm7, 5: G13
-const DALAT_ACOUSTIC_CHORDS: ReadonlyArray<readonly [number, number, number, number]> = [
-  [87.31, 130.81, 220.0, 329.63], // Fmaj7 (F2 - C3 - A3 - E4)
-  [98.0, 146.83, 246.94, 329.63], // G6    (G2 - D3 - B3 - E4)
-  [82.41, 123.47, 196.0, 293.66], // Em7   (E2 - B2 - G3 - D4)
-  [110.0, 164.81, 261.63, 493.88], // Am9   (A2 - E3 - C4 - B4)
-  [146.83, 220.0, 261.63, 349.23], // Dm7   (D3 - A3 - C4 - F4)
-  [98.0, 174.61, 246.94, 329.63], // G13   (G2 - F3 - B3 - E4)
-];
 
 // Singleton guard so even if mounted in both App and WorldRoot, only one audio graph runs
 let activeSoundscapeOwner: symbol | null = null;
 
-interface WebAudioEngine {
-  ctx: AudioContext;
-  masterGain: GainNode;
-  pinkBuffer: AudioBuffer;
-  windGain: GainNode;
-  windBandpass: BiquadFilterNode;
-  drizzleGain: GainNode;
-  fireBedGain: GainNode;
-}
+// Pre-computed seamless 2.0-second Paul Kellet pink-noise waveform (96,000 samples @ 48 kHz)
+// generated asynchronously during idle so the first user click gesture takes <0.2ms on main thread!
+const PREBAKED_PINK_SAMPLES = 96_000;
+let cachedPinkWaveform: Float32Array | null = null;
 
-/**
- * Generates a seamless 6-second Paul Kellet pink-noise buffer with smooth loop crossfade.
- */
-function createSeamlessPinkNoiseBuffer(ctx: AudioContext, durationSec = 6.0): AudioBuffer {
-  const sampleRate = ctx.sampleRate;
-  const length = Math.floor(sampleRate * durationSec);
-  const buffer = ctx.createBuffer(1, length, sampleRate);
-  const data = buffer.getChannelData(0);
+function getPrebakedPinkWaveform(): Float32Array {
+  if (cachedPinkWaveform) return cachedPinkWaveform;
+  const length = PREBAKED_PINK_SAMPLES;
+  const raw = new Float32Array(length);
+  const out = new Float32Array(length);
 
   let b0 = 0;
   let b1 = 0;
@@ -45,7 +33,6 @@ function createSeamlessPinkNoiseBuffer(ctx: AudioContext, durationSec = 6.0): Au
   let b5 = 0;
   let b6 = 0;
 
-  const raw = new Float32Array(length);
   for (let i = 0; i < length; i++) {
     const white = Math.random() * 2 - 1;
     b0 = 0.99886 * b0 + white * 0.0555179;
@@ -58,17 +45,33 @@ function createSeamlessPinkNoiseBuffer(ctx: AudioContext, durationSec = 6.0): Au
     b6 = white * 0.115926;
   }
 
-  // Seamless crossfade over last 0.25s so loop wrap has zero click
-  const fadeSamples = Math.floor(sampleRate * 0.25);
+  const fadeSamples = 12_000; // 0.25s seamless loop crossfade
   for (let i = 0; i < length; i++) {
     if (i < fadeSamples) {
       const u = i / fadeSamples;
-      data[i] = raw[i] * u + raw[length - fadeSamples + i] * (1 - u);
+      out[i] = raw[i] * u + raw[length - fadeSamples + i] * (1 - u);
     } else {
-      data[i] = raw[i];
+      out[i] = raw[i];
     }
   }
 
+  cachedPinkWaveform = out;
+  return out;
+}
+
+if (typeof window !== 'undefined') {
+  setTimeout(() => {
+    getPrebakedPinkWaveform();
+  }, 60);
+}
+
+/**
+ * Copies the pre-baked seamless Paul Kellet pink-noise waveform into an AudioBuffer in <0.2ms.
+ */
+function createSeamlessPinkNoiseBuffer(ctx: AudioContext, _durationSec = 2.0): AudioBuffer {
+  const waveform = getPrebakedPinkWaveform();
+  const buffer = ctx.createBuffer(1, waveform.length, ctx.sampleRate);
+  buffer.getChannelData(0).set(waveform);
   return buffer;
 }
 
@@ -102,6 +105,7 @@ function scheduleDawnBirdChirp(engine: WebAudioEngine, volumeScale: number): voi
 
     osc.connect(env);
     env.connect(panner);
+    trackTransientSource(engine, osc);
     osc.start(t0);
     osc.stop(t0 + dur + 0.02);
   }
@@ -133,125 +137,8 @@ function scheduleCampfireCrackle(engine: WebAudioEngine, proximity: number): voi
   env.connect(masterGain);
 
   const randomOffset = Math.random() * Math.max(0.1, pinkBuffer.duration - 0.1);
+  trackTransientSource(engine, src);
   src.start(now, randomOffset, dur + 0.01);
-}
-
-function playHighlandJamChord(
-  engine: WebAudioEngine,
-  jam: Pick<AcousticJamNote, 'chordIndex' | 'instrument'>,
-  attenuation: number
-): void {
-  const { ctx, pinkBuffer, masterGain } = engine;
-  if (ctx.state !== 'running' || attenuation <= 0.02) return;
-
-  const safeIdx = ((Math.round(jam.chordIndex) % DALAT_ACOUSTIC_CHORDS.length) + DALAT_ACOUSTIC_CHORDS.length) %
-    DALAT_ACOUSTIC_CHORDS.length;
-  const chord = DALAT_ACOUSTIC_CHORDS[safeIdx];
-  const now = ctx.currentTime + 0.015;
-
-  if (jam.instrument === 'cajon') {
-    // Warm woody Cajon bass + brush tap + soft sympathetic chord hum
-    const kickOsc = ctx.createOscillator();
-    const kickGain = ctx.createGain();
-    kickOsc.type = 'sine';
-    kickOsc.frequency.setValueAtTime(132, now);
-    kickOsc.frequency.exponentialRampToValueAtTime(54, now + 0.14);
-    kickGain.gain.setValueAtTime(0.24 * attenuation, now);
-    kickGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
-    kickOsc.connect(kickGain);
-    kickGain.connect(masterGain);
-    kickOsc.start(now);
-    kickOsc.stop(now + 0.24);
-
-    const snareSrc = ctx.createBufferSource();
-    snareSrc.buffer = pinkBuffer;
-    const snareBp = ctx.createBiquadFilter();
-    snareBp.type = 'highpass';
-    snareBp.frequency.setValueAtTime(1400, now);
-    const snareGain = ctx.createGain();
-    snareGain.gain.setValueAtTime(0.11 * attenuation, now + 0.005);
-    snareGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.085);
-    snareSrc.connect(snareBp);
-    snareBp.connect(snareGain);
-    snareGain.connect(masterGain);
-    snareSrc.start(now, Math.random() * 3.0, 0.1);
-    return;
-  }
-
-  if (jam.instrument === 'chime') {
-    // Luminous highland bamboo / wind-chime chord
-    for (let i = 0; i < 4; i++) {
-      const t0 = now + i * 0.042;
-      const freq = chord[i] * 2.0; // Octave up for crystalline bamboo/chime bell
-      const oscFund = ctx.createOscillator();
-      const oscOvertone = ctx.createOscillator();
-      const env = ctx.createGain();
-
-      oscFund.type = 'sine';
-      oscFund.frequency.setValueAtTime(freq, t0);
-      oscOvertone.type = 'triangle';
-      oscOvertone.frequency.setValueAtTime(freq * 2.756, t0);
-
-      const overtoneGain = ctx.createGain();
-      overtoneGain.gain.setValueAtTime(0.22, t0);
-
-      env.gain.setValueAtTime(0.0001, t0);
-      env.gain.linearRampToValueAtTime(0.075 * attenuation, t0 + 0.008);
-      env.gain.exponentialRampToValueAtTime(0.0001, t0 + 2.1);
-
-      oscFund.connect(env);
-      oscOvertone.connect(overtoneGain);
-      overtoneGain.connect(env);
-      env.connect(masterGain);
-
-      oscFund.start(t0);
-      oscOvertone.start(t0);
-      oscFund.stop(t0 + 2.15);
-      oscOvertone.stop(t0 + 2.15);
-    }
-    return;
-  }
-
-  // Default: Warm 4-string nylon/acoustic guitar chord strum
-  const bodyFilter = ctx.createBiquadFilter();
-  bodyFilter.type = 'lowpass';
-  bodyFilter.frequency.setValueAtTime(2550, now);
-  bodyFilter.frequency.exponentialRampToValueAtTime(720, now + 1.85);
-  bodyFilter.Q.setValueAtTime(1.15, now);
-  bodyFilter.connect(masterGain);
-
-  for (let i = 0; i < 4; i++) {
-    const t0 = now + i * 0.028; // Gentle thumb-brush arpeggio stagger
-    const freq = chord[i];
-    const dur = 2.25 - i * 0.1;
-
-    const oscBody = ctx.createOscillator();
-    const oscPluck = ctx.createOscillator();
-    const pluckSubGain = ctx.createGain();
-    const stringEnv = ctx.createGain();
-
-    oscBody.type = 'triangle';
-    oscBody.frequency.setValueAtTime(freq, t0);
-
-    oscPluck.type = 'sawtooth';
-    oscPluck.frequency.setValueAtTime(freq * 1.0015, t0);
-    pluckSubGain.gain.setValueAtTime(0.32, t0);
-    pluckSubGain.gain.exponentialRampToValueAtTime(0.02, t0 + 0.24);
-
-    stringEnv.gain.setValueAtTime(0.0001, t0);
-    stringEnv.gain.linearRampToValueAtTime(0.088 * attenuation, t0 + 0.009);
-    stringEnv.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-
-    oscBody.connect(stringEnv);
-    oscPluck.connect(pluckSubGain);
-    pluckSubGain.connect(stringEnv);
-    stringEnv.connect(bodyFilter);
-
-    oscBody.start(t0);
-    oscPluck.start(t0);
-    oscBody.stop(t0 + dur + 0.04);
-    oscPluck.stop(t0 + dur + 0.04);
-  }
 }
 
 export function SoundscapeController() {
@@ -278,9 +165,15 @@ export function SoundscapeController() {
     }
     activeSoundscapeOwner = owner;
 
-    const ensureAudioEngine = (): WebAudioEngine | null => {
+    const ensureAudioEngine = (fromGesture = false): WebAudioEngine | null => {
       if (engineRef.current) {
-        if (engineRef.current.ctx.state === 'suspended') {
+        const stNow = useGameStore.getState();
+        if (
+          fromGesture &&
+          stNow.audioEnabled &&
+          !document.hidden &&
+          engineRef.current.ctx.state === 'suspended'
+        ) {
           void engineRef.current.ctx.resume().catch(() => {});
         }
         return engineRef.current;
@@ -352,7 +245,9 @@ export function SoundscapeController() {
       fireBedGain.connect(masterGain);
       fireSrc.start(0, 3.3);
 
-      if (ctx.state === 'suspended') {
+      if (!st.audioEnabled || document.hidden) {
+        void ctx.suspend().catch(() => {});
+      } else if (fromGesture && ctx.state === 'suspended') {
         void ctx.resume().catch(() => {});
       }
 
@@ -364,18 +259,41 @@ export function SoundscapeController() {
         windBandpass,
         drizzleGain,
         fireBedGain,
+        activeTransientSources: new Set<AudioScheduledSourceNode>(),
       };
       engineRef.current = created;
+      registerHighlandAudioEngine(created);
       return created;
     };
 
     const onUserGesture = () => {
-      ensureAudioEngine();
+      if (!useGameStore.getState().audioEnabled) return;
+      ensureAudioEngine(true);
+    };
+
+    const onVisibilityChange = () => {
+      const eng = engineRef.current;
+      if (!eng) return;
+      if (document.hidden) {
+        stopAllTransientSources(eng);
+        void eng.ctx.suspend().catch(() => {});
+      } else if (useGameStore.getState().audioEnabled && eng.ctx.state === 'suspended') {
+        void eng.ctx.resume().catch(() => {});
+      }
     };
 
     window.addEventListener('pointerdown', onUserGesture, { passive: true });
     window.addEventListener('keydown', onUserGesture, { passive: true });
     window.addEventListener('touchstart', onUserGesture, { passive: true });
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
+    // Pre-initialize AudioContext + filter graph during idle on Landing (starts suspended cleanly)
+    // so clicking "Vào Đón Bình Minh" only calls async ctx.resume() (<0.2ms instead of ~200ms CoreAudio init)!
+    const prewarmAudioTimer = window.setTimeout(() => {
+      if (useGameStore.getState().audioEnabled && !document.hidden) {
+        ensureAudioEngine();
+      }
+    }, 180);
 
     let nextBirdTimeMs = Date.now() + 2600;
     let nextAmbientChordMs = Date.now() + 5500;
@@ -426,13 +344,14 @@ export function SoundscapeController() {
 
       // Gentle ambient campfire acoustic chord if player lounges by the fire & nobody jammed recently
       if (
+        !st.quietMode &&
         fireProximity > 0.28 &&
         nowMs >= nextAmbientChordMs &&
         nowMs - lastManualJamMsRef.current > 9000
       ) {
         playHighlandJamChord(
           eng,
-          { chordIndex: ambientChordStep % 6, instrument: 'guitar' },
+          { chordIndex: ambientChordStep % GUITAR_CHORDS.length, instrument: 'guitar' },
           fireProximity * 0.42
         );
         ambientChordStep++;
@@ -454,30 +373,46 @@ export function SoundscapeController() {
     }, 100);
 
     return () => {
+      window.clearTimeout(prewarmAudioTimer);
       window.clearInterval(timer);
       window.removeEventListener('pointerdown', onUserGesture);
       window.removeEventListener('keydown', onUserGesture);
       window.removeEventListener('touchstart', onUserGesture);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
 
       if (engineRef.current) {
+        stopAllTransientSources(engineRef.current);
         void engineRef.current.ctx.close().catch(() => {});
         engineRef.current = null;
       }
+      registerHighlandAudioEngine(null);
       if (activeSoundscapeOwner === owner) {
         activeSoundscapeOwner = null;
       }
     };
   }, []);
 
-  // Immediate gain response when audioEnabled or masterVolume changes
+  // Immediate gain response + clean oscillator stop/suspend when muted (`!audioEnabled`)
   useEffect(() => {
     const eng = engineRef.current;
     if (!eng) return;
-    const target = audioEnabled ? clamp01(masterVolume) : 0.0;
+    if (!audioEnabled) {
+      eng.masterGain.gain.cancelScheduledValues(eng.ctx.currentTime);
+      eng.masterGain.gain.setValueAtTime(0, eng.ctx.currentTime);
+      stopAllTransientSources(eng);
+      if (eng.ctx.state === 'running') {
+        void eng.ctx.suspend().catch(() => {});
+      }
+      return;
+    }
+    if (!document.hidden && eng.ctx.state === 'suspended') {
+      void eng.ctx.resume().catch(() => {});
+    }
+    const target = clamp01(masterVolume);
     eng.masterGain.gain.setTargetAtTime(target, eng.ctx.currentTime, 0.05);
   }, [audioEnabled, masterVolume]);
 
-  // Pluck lush warm 4-string acoustic guitar / bamboo chime / cajon whenever lastJamNote updates!
+  // Pluck lush warm multi-string acoustic guitar / bamboo chime / cajon whenever lastJamNote updates!
   useEffect(() => {
     if (!lastJamNote) return;
     if (lastJamNote.timestamp === seenJamTimestampRef.current) return;
@@ -485,7 +420,7 @@ export function SoundscapeController() {
     lastManualJamMsRef.current = Date.now();
 
     const st = useGameStore.getState();
-    if (!st.audioEnabled) return;
+    if (!st.audioEnabled || document.hidden) return;
 
     const eng = engineRef.current;
     if (!eng) return;
@@ -494,16 +429,23 @@ export function SoundscapeController() {
     }
 
     const isLocalPlayer =
-      Boolean(st.localSessionId) && lastJamNote.senderId === st.localSessionId;
-    const p = st.localTransient;
-    const dist = Math.hypot(
-      p.x - CAMPFIRE_POS[0],
-      p.y - CAMPFIRE_POS[1],
-      p.z - CAMPFIRE_POS[2]
-    );
-    const spatialGain = isLocalPlayer
-      ? 1.0
-      : Math.max(0.18, Math.pow(clamp01(1.0 - dist / 55.0), 1.4));
+      lastJamNote.senderId === 'local' ||
+      (Boolean(st.localSessionId) && lastJamNote.senderId === st.localSessionId);
+
+    let spatialGain: number;
+    if (isLocalPlayer || (st.heldItem === 'guitar' && isLocalPlayer)) {
+      // Local player's own held guitar plays at full cozy volume anywhere on the mountain!
+      spatialGain = 1.0;
+    } else {
+      const p = st.localTransient;
+      const senderPeer = st.peers[lastJamNote.senderId];
+      const srcX = senderPeer ? senderPeer.x : CAMPFIRE_POS[0];
+      const srcY = senderPeer ? senderPeer.y : CAMPFIRE_POS[1];
+      const srcZ = senderPeer ? senderPeer.z : CAMPFIRE_POS[2];
+      const dist = Math.hypot(p.x - srcX, p.y - srcY, p.z - srcZ);
+      const baseRemote = Math.max(0.14, Math.pow(clamp01(1.0 - dist / 55.0), 1.4));
+      spatialGain = st.quietMode ? baseRemote * 0.16 : baseRemote;
+    }
 
     playHighlandJamChord(eng, lastJamNote, spatialGain);
   }, [lastJamNote]);
@@ -515,13 +457,22 @@ export function SoundscapeController() {
     seenSocialNonceRef.current = socialSparkleBurst.id;
 
     const st = useGameStore.getState();
-    if (!st.audioEnabled) return;
+    if (!st.audioEnabled || document.hidden) return;
     const eng = engineRef.current;
     if (!eng) return;
     if (eng.ctx.state === 'suspended') {
       void eng.ctx.resume().catch(() => {});
     }
     if (eng.ctx.state !== 'running') return;
+
+    const p = st.localTransient;
+    const distFromLocal = Math.hypot(
+      socialSparkleBurst.x - p.x,
+      socialSparkleBurst.z - p.z
+    );
+    const isRemoteBurst = distFromLocal > 2.4;
+    const quietScale = st.quietMode && isRemoteBurst ? 0.18 : 1.0;
+    if (quietScale <= 0.05) return;
 
     const { ctx, masterGain } = eng;
     const now = ctx.currentTime + 0.01;
@@ -534,12 +485,13 @@ export function SoundscapeController() {
         const env = ctx.createGain();
         osc.type = i === 0 ? 'triangle' : 'sine';
         osc.frequency.setValueAtTime(freqs[i], now + i * 0.006);
-        const peak = i === 0 ? 0.075 : i === 1 ? 0.045 : 0.022;
+        const peak = (i === 0 ? 0.075 : i === 1 ? 0.045 : 0.022) * quietScale;
         env.gain.setValueAtTime(0.0001, now);
         env.gain.linearRampToValueAtTime(peak, now + 0.005);
         env.gain.exponentialRampToValueAtTime(0.0001, now + 0.42 - i * 0.08);
         osc.connect(env);
         env.connect(masterGain);
+        trackTransientSource(eng, osc);
         osc.start(now + i * 0.006);
         osc.stop(now + 0.46);
       }
@@ -554,10 +506,11 @@ export function SoundscapeController() {
         osc.type = 'sine';
         osc.frequency.setValueAtTime(notes[i], t0);
         env.gain.setValueAtTime(0.0001, t0);
-        env.gain.linearRampToValueAtTime(0.055, t0 + 0.01);
+        env.gain.linearRampToValueAtTime(0.055 * quietScale, t0 + 0.01);
         env.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.55);
         osc.connect(env);
         env.connect(masterGain);
+        trackTransientSource(eng, osc);
         osc.start(t0);
         osc.stop(t0 + 0.58);
       }

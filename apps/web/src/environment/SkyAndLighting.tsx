@@ -28,6 +28,7 @@ const SKY_DOME_FRAG = /* glsl */ `
   uniform float uIsSunrise;
   uniform float uTime;
   uniform float uLinearHdrOutput;
+  uniform float uGroundBounceMix;
 
   varying vec3 vWorldDir;
 
@@ -106,10 +107,15 @@ const SKY_DOME_FRAG = /* glsl */ `
     float horizonBand = exp(-abs(dir.y) * 6.8);
     skyCol = mix(skyCol, mix(uHorizonColor, uFogColor, 0.28), horizonBand * 0.46);
 
-    // Below-horizon valley haze bowl
+    // Below-horizon valley haze bowl (sky dome) vs warm highland earth/forest bounce (IBL probe)
     if (dir.y < 0.0) {
       float downBlend = smoothstep(0.0, -0.22, dir.y);
       skyCol = mix(skyCol, uFogColor, downBlend);
+      if (uGroundBounceMix > 0.5) {
+        float deepBounce = smoothstep(-0.10, -0.58, dir.y);
+        vec3 earthBounce = vec3(0.095, 0.115, 0.092) + uSunColor * 0.038 + uFogColor * 0.16;
+        skyCol = mix(skyCol, earthBounce, deepBounce);
+      }
     }
 
     // East Sunrise Solar Disc & Multi-Lobe Mie Golden Halo
@@ -226,14 +232,14 @@ export function SkyAndLighting() {
   const hemiLightRef = useRef<THREE.HemisphereLight>(null);
   const drizzleMeshRef = useRef<THREE.InstancedMesh>(null);
 
-  const shadowMapSize = qualityTier === 'high' ? 1536 : qualityTier === 'medium' ? 1024 : 512;
-  const shadowFrustumHalf = qualityTier === 'high' ? 58 : qualityTier === 'medium' ? 76 : 110;
+  const shadowMapSize = qualityTier === 'high' ? 2048 : qualityTier === 'medium' ? 1024 : 512;
+  const shadowFrustumHalf = qualityTier === 'high' ? 42 : qualityTier === 'medium' ? 68 : 105;
 
   // 1. Sky Dome Geometry & ShaderMaterial (+ mini HDR sky probe for live PBR IBL reflections!)
   const { skyGeometry, skyMaterial, iblScene, iblMaterial } = useMemo(() => {
     const geo = new THREE.SphereGeometry(SKY_RADIUS, 48, 32);
     const initAtmo = useGameStore.getState().atmosphere;
-    const makeUniforms = (linearHdr: number) => ({
+    const makeUniforms = (linearHdr: number, groundBounceMix: number) => ({
       uZenithColor: { value: new THREE.Color(initAtmo.skyZenithHex) },
       uHorizonColor: { value: new THREE.Color(initAtmo.skyHorizonHex) },
       uFogColor: { value: new THREE.Color(initAtmo.fogHex) },
@@ -243,10 +249,11 @@ export function SkyAndLighting() {
       uIsSunrise: { value: initAtmo.isSunriseWindow ? 1.0 : 0.0 },
       uTime: { value: 0 },
       uLinearHdrOutput: { value: linearHdr },
+      uGroundBounceMix: { value: groundBounceMix },
     });
 
     const mat = new THREE.ShaderMaterial({
-      uniforms: makeUniforms(qualityTier === 'mobile' ? 0.0 : 1.0),
+      uniforms: makeUniforms(qualityTier === 'mobile' ? 0.0 : 1.0, 0.0),
       vertexShader: SKY_DOME_VERT,
       fragmentShader: SKY_DOME_FRAG,
       side: THREE.BackSide,
@@ -258,7 +265,7 @@ export function SkyAndLighting() {
     const probeScene = new THREE.Scene();
     const probeGeo = new THREE.SphereGeometry(12, 24, 16);
     const probeMat = new THREE.ShaderMaterial({
-      uniforms: makeUniforms(1.0),
+      uniforms: makeUniforms(1.0, 1.0),
       vertexShader: SKY_DOME_VERT,
       fragmentShader: SKY_DOME_FRAG,
       side: THREE.BackSide,
@@ -571,9 +578,9 @@ export function SkyAndLighting() {
         position={[200, 210, 45]}
         intensity={1.7}
         shadow-mapSize={[shadowMapSize, shadowMapSize]}
-        shadow-bias={-0.00025}
-        shadow-normalBias={0.018}
-        shadow-radius={2.2}
+        shadow-bias={-0.0002}
+        shadow-normalBias={0.014}
+        shadow-radius={1.65}
         shadow-camera-left={-shadowFrustumHalf}
         shadow-camera-right={shadowFrustumHalf}
         shadow-camera-top={shadowFrustumHalf}

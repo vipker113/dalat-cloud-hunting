@@ -5,6 +5,7 @@ import type { SocialInteractKind } from '@dalat/protocol';
 import type { IMultiplayerController } from '../network/types';
 import { useGameStore } from '../store/gameStore';
 import { LocalPlayerAvatar } from './HighlandAvatar';
+import { InteractableBeacons3D } from './InteractableBeacons3D';
 import { PeerCrowdRenderer } from './PeerCrowdRenderer';
 import { PhotoCaptureBridge } from './PhotoCaptureBridge';
 import { PlayerController } from './PlayerController';
@@ -155,6 +156,31 @@ function SocialSparkleFX() {
 }
 
 /**
+ * Wraps the local player's HighlandAvatar so 35mm viewfinder shots never catch
+ * the local player's hair or beret in the bottom-right corner (`photoModeActive && photoCountdown === 0`).
+ */
+function LocalPlayerRig() {
+  const rigRef = useRef<THREE.Group>(null);
+  const hideAvatar = useGameStore(
+    (s) => s.photoModeActive && s.photoCountdown === 0
+  );
+
+  useFrame(() => {
+    if (!rigRef.current) return;
+    const st = useGameStore.getState();
+    rigRef.current.visible =
+      !(st.photoModeActive && st.photoCountdown === 0) &&
+      !st.localTransient.cameraOccludesSelf;
+  });
+
+  return (
+    <group ref={rigRef} visible={!hideAvatar}>
+      <LocalPlayerAvatar />
+    </group>
+  );
+}
+
+/**
  * Root 3D Gameplay graph mounted inside the R3F <Canvas>.
  * Coordinates third-person BVH capsule locomotion, local HighlandAvatar,
  * 16/32 near peer crowd + distant storm-lantern beacons, social FX, and Polaroid frame capture.
@@ -169,8 +195,9 @@ export function GameplayRoot({ net }: GameplayRootProps) {
   return (
     <NetControllerContext.Provider value={net ?? null}>
       <PlayerController net={net} />
-      <LocalPlayerAvatar />
+      <LocalPlayerRig />
       <PeerCrowdRenderer />
+      <InteractableBeacons3D net={net} />
       <SocialSparkleFX />
       <PhotoCaptureBridge />
     </NetControllerContext.Provider>

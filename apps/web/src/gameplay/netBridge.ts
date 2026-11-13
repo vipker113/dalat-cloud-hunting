@@ -23,13 +23,17 @@ const offlineFallbackController: IMultiplayerController = {
     const code = roomCodeOrId.trim().toUpperCase() || 'MAY-01';
     useGameStore.getState().setNetworkStatus({
       roomCode: code,
-      channelName: `Sương Sớm Cầu Đất (${code})`,
+      channelName: 'Sương Sớm Cầu Đất',
     });
+    return { ok: true, roomCode: code, channelName: 'Sương Sớm Cầu Đất' };
   },
   async refreshChannels() {
     // No-op when offline
   },
   sendMove() {
+    // No-op when offline
+  },
+  sendTeleport() {
     // No-op when offline
   },
   sendChat(text: string) {
@@ -109,13 +113,15 @@ const offlineFallbackController: IMultiplayerController = {
       timestamp: Date.now(),
     });
   },
-  pinPolaroid(entry) {
+  async pinPolaroid(entry) {
+    const id = `pol-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
     useGameStore.getState().prependPolaroid({
       ...entry,
-      id: `pol-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id,
       likes: 1,
       createdAt: Date.now(),
     });
+    return { ok: true, polaroidId: id };
   },
   likePolaroid(polaroidId) {
     const st = useGameStore.getState();

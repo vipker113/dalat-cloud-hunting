@@ -8,13 +8,32 @@ import type { IMultiplayerController } from '../network/types';
 import { InteractPrompt, NearbyPeerInfo, useGameStore } from '../store/gameStore';
 
 export const INTERACTION_SPOTS = {
-  CAFE_PHIN_COUNTER: [-41.0, 135.15, 31.0] as [number, number, number],
-  CAFE_SOY_KETTLE: [-38.8, 135.15, 29.5] as [number, number, number],
-  CAMPFIRE_STAGE: [-53.0, 135.15, 24.0] as [number, number, number],
-  POLAROID_WALL: [-43.0, 135.15, 24.0] as [number, number, number],
-  LONELY_PINE_WISH: [-95.0, 176.0, -155.0] as [number, number, number],
-  CUB_OVERLOOK: [19.8, 112.0, 125.2] as [number, number, number],
+  CAFE_PHIN_COUNTER: [-39.1, sampleWalkableHeight(-39.1, 30.0), 30.0] as [number, number, number],
+  CAFE_SOY_KETTLE: [-38.8, sampleWalkableHeight(-38.8, 28.6), 28.6] as [number, number, number],
+  CAMPFIRE_STAGE: [-53.0, sampleWalkableHeight(-53.0, 24.0), 24.0] as [number, number, number],
+  POLAROID_WALL: [-40.5, sampleWalkableHeight(-40.5, 26.2), 26.2] as [number, number, number],
+  LONELY_PINE_WISH: [-95.0, sampleWalkableHeight(-95.0, -155.0), -155.0] as [
+    number,
+    number,
+    number,
+  ],
+  CUB_OVERLOOK: [19.8, sampleWalkableHeight(19.8, 125.2), 125.2] as [number, number, number],
 } as const;
+
+export function computeBenchStandUpPosition(seatId: string): [number, number, number] | null {
+  const seatTransform = resolveBenchSeatTransform(seatId);
+  if (!seatTransform) return null;
+  const benchId = seatTransform.bench.id;
+  if (benchId === 'bench-cafe-1' || benchId === 'bench-cafe-2') {
+    // Step inward onto clear Café Mơ Sương veranda planks (x - 0.72), never into the (-26.5, 24.5) lantern pole or east railing!
+    const standX = seatTransform.position[0] - 0.72;
+    const standZ = seatTransform.position[2];
+    return [standX, sampleWalkableHeight(standX, standZ), standZ];
+  }
+  const standX = seatTransform.position[0] + Math.sin(seatTransform.yaw) * 0.78;
+  const standZ = seatTransform.position[2] + Math.cos(seatTransform.yaw) * 0.78;
+  return [standX, sampleWalkableHeight(standX, standZ), standZ];
+}
 
 export const HIGHLAND_GUITAR_CHORDS = [
   { index: 0, key: '1', name: 'Cadd9', mood: 'Sương mai ngân nhẹ' },
@@ -29,11 +48,14 @@ function dist2D(ax: number, az: number, bx: number, bz: number): number {
   return Math.hypot(ax - bx, az - bz);
 }
 
+const MAX_VERTICAL_INTERACT_DIST = 2.3;
+
 /**
  * Computes the highest-priority context-aware proximity prompt for the local player.
  */
-export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | null {
+export function evaluateNearbyPrompt(px: number, pz: number, py?: number): InteractPrompt | null {
   const st = useGameStore.getState();
+  const playerY = typeof py === 'number' && Number.isFinite(py) ? py : st.localTransient.y;
 
   // If currently seated on a bench, allow standing up cleanly with [E]
   if (st.seatedBenchId) {
@@ -52,9 +74,10 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
   let bestPrompt: InteractPrompt | null = null;
   let bestScore = Infinity;
 
-  // 1. Shared 2-Seater Benches (< 2.8m)
+  // 1. Shared 2-Seater Benches (< 2.8m horizontal, <= 2.3m vertical)
   for (let i = 0; i < SHARED_BENCHES.length; i++) {
     const bench = SHARED_BENCHES[i];
+    if (Math.abs(playerY - bench.position[1]) > MAX_VERTICAL_INTERACT_DIST) continue;
     const occ0 = st.occupiedBenches[`${bench.id}:0`] || st.occupiedBenches[bench.id];
     const occ1 = st.occupiedBenches[`${bench.id}:1`];
     const slot0Free = !occ0 || occ0 === st.localSessionId;
@@ -74,9 +97,18 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
     }
   }
 
-  // 2. Polaroid Community Wall ([-43, 135, 24], < 3.3m)
-  const dPolaroid = dist2D(px, pz, INTERACTION_SPOTS.POLAROID_WALL[0], INTERACTION_SPOTS.POLAROID_WALL[2]);
-  if (dPolaroid < 3.3 && dPolaroid < bestScore) {
+  // 2. Polaroid Community Wall ([-40.5, 135.31, 26.2], < 3.3m horizontal, <= 2.3m vertical)
+  const dPolaroid = dist2D(
+    px,
+    pz,
+    INTERACTION_SPOTS.POLAROID_WALL[0],
+    INTERACTION_SPOTS.POLAROID_WALL[2]
+  );
+  if (
+    Math.abs(playerY - INTERACTION_SPOTS.POLAROID_WALL[1]) <= MAX_VERTICAL_INTERACT_DIST &&
+    dPolaroid < 3.3 &&
+    dPolaroid < bestScore
+  ) {
     bestScore = dPolaroid;
     bestPrompt = {
       id: 'polaroid-wall',
@@ -87,11 +119,26 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
     };
   }
 
-  // 3. Cafe Counter Drinks ([-41, 135, 31] & Soy Milk Kettle, < 3.8m)
-  const dPhin = dist2D(px, pz, INTERACTION_SPOTS.CAFE_PHIN_COUNTER[0], INTERACTION_SPOTS.CAFE_PHIN_COUNTER[2]);
-  const dSoy = dist2D(px, pz, INTERACTION_SPOTS.CAFE_SOY_KETTLE[0], INTERACTION_SPOTS.CAFE_SOY_KETTLE[2]);
+  // 3. Cafe Counter Drinks ([-39.1, 135.31, 30.0] & Soy Milk Kettle, < 3.8m horizontal, <= 2.3m vertical)
+  const dPhin = dist2D(
+    px,
+    pz,
+    INTERACTION_SPOTS.CAFE_PHIN_COUNTER[0],
+    INTERACTION_SPOTS.CAFE_PHIN_COUNTER[2]
+  );
+  const dSoy = dist2D(
+    px,
+    pz,
+    INTERACTION_SPOTS.CAFE_SOY_KETTLE[0],
+    INTERACTION_SPOTS.CAFE_SOY_KETTLE[2]
+  );
   const dCafe = Math.min(dPhin, dSoy);
-  if (dCafe < 3.8 && dCafe < bestScore) {
+  const cafeTargetY = INTERACTION_SPOTS.CAFE_PHIN_COUNTER[1];
+  if (
+    Math.abs(playerY - cafeTargetY) <= MAX_VERTICAL_INTERACT_DIST &&
+    dCafe < 3.8 &&
+    dCafe < bestScore
+  ) {
     bestScore = dCafe;
     // Offer soy milk if closer to soy kettle OR already holding phin_coffee; otherwise offer phin_coffee!
     const preferSoy = dSoy + 0.35 < dPhin || st.heldItem === 'phin_coffee';
@@ -114,9 +161,18 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
     }
   }
 
-  // 4. Campfire Acoustic Stage ([-53, 135, 24], < 5.5m)
-  const dFire = dist2D(px, pz, INTERACTION_SPOTS.CAMPFIRE_STAGE[0], INTERACTION_SPOTS.CAMPFIRE_STAGE[2]);
-  if (dFire < 5.5 && dFire < bestScore) {
+  // 4. Campfire Acoustic Stage ([-53, y, 24], < 5.5m horizontal, <= 2.3m vertical)
+  const dFire = dist2D(
+    px,
+    pz,
+    INTERACTION_SPOTS.CAMPFIRE_STAGE[0],
+    INTERACTION_SPOTS.CAMPFIRE_STAGE[2]
+  );
+  if (
+    Math.abs(playerY - INTERACTION_SPOTS.CAMPFIRE_STAGE[1]) <= MAX_VERTICAL_INTERACT_DIST &&
+    dFire < 5.5 &&
+    dFire < bestScore
+  ) {
     bestScore = dFire;
     bestPrompt = {
       id: 'campfire-acoustic',
@@ -127,9 +183,18 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
     };
   }
 
-  // 5. Cây Thông Cô Đơn Wind-Chime Wish Tree ([-95, 158, -155], < 5.4m)
-  const dPine = dist2D(px, pz, INTERACTION_SPOTS.LONELY_PINE_WISH[0], INTERACTION_SPOTS.LONELY_PINE_WISH[2]);
-  if (dPine < 5.4 && dPine < bestScore) {
+  // 5. Cây Thông Cô Đơn Wind-Chime Wish Tree ([-95, y, -155], < 5.4m horizontal, <= 2.3m vertical)
+  const dPine = dist2D(
+    px,
+    pz,
+    INTERACTION_SPOTS.LONELY_PINE_WISH[0],
+    INTERACTION_SPOTS.LONELY_PINE_WISH[2]
+  );
+  if (
+    Math.abs(playerY - INTERACTION_SPOTS.LONELY_PINE_WISH[1]) <= MAX_VERTICAL_INTERACT_DIST &&
+    dPine < 5.4 &&
+    dPine < bestScore
+  ) {
     bestScore = dPine;
     bestPrompt = {
       id: 'lonely-pine-wish',
@@ -140,9 +205,13 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
     };
   }
 
-  // 6. Vintage Super Cub Overlook at Thung Lũng Đèn ([-112, 84, 142], < 3.6m)
+  // 6. Vintage Super Cub Overlook at Thung Lũng Đèn (< 3.6m horizontal, <= 2.3m vertical)
   const dCub = dist2D(px, pz, INTERACTION_SPOTS.CUB_OVERLOOK[0], INTERACTION_SPOTS.CUB_OVERLOOK[2]);
-  if (dCub < 3.6 && dCub < bestScore) {
+  if (
+    Math.abs(playerY - INTERACTION_SPOTS.CUB_OVERLOOK[1]) <= MAX_VERTICAL_INTERACT_DIST &&
+    dCub < 3.6 &&
+    dCub < bestScore
+  ) {
     bestScore = dCub;
     bestPrompt = {
       id: 'cub-photo-spot',
@@ -150,6 +219,17 @@ export function evaluateNearbyPrompt(px: number, pz: number): InteractPrompt | n
       sublabel: 'Mở ống kính Film 35mm bắt trọn biển đèn vàng Thái Phiên',
       actionType: 'cub_photo',
       position: INTERACTION_SPOTS.CUB_OVERLOOK,
+    };
+  }
+
+  // 7. Deep Valley Safety Return Prompt when hiked down below y < 88m
+  if (!bestPrompt && playerY < 88) {
+    bestPrompt = {
+      id: 'valley-cub-return',
+      label: '🛵 Nhờ xe Cub chở lại Đài Ngắm Đèn [E]',
+      sublabel: 'Quay lại đỉnh đồi săn mây nhanh chóng & an toàn',
+      actionType: 'valley_return',
+      position: [px, playerY + 0.35, pz],
     };
   }
 
@@ -447,6 +527,8 @@ export function playTemporaryEmote(
 
 export function executeInteractPrompt(prompt: InteractPrompt, net: IMultiplayerController): void {
   const st = useGameStore.getState();
+  st.recordUXEvent('context_interact');
+  st.advanceOnboarding('interact');
 
   switch (prompt.actionType) {
     case 'brew_phin': {
@@ -467,12 +549,12 @@ export function executeInteractPrompt(prompt: InteractPrompt, net: IMultiplayerC
     }
     case 'sit_bench': {
       if (st.seatedBenchId || !prompt.benchId) {
-        // Stand up smoothly and step clear in front of the bench
-        const curSeat = st.seatedBenchId ? resolveBenchSeatTransform(st.seatedBenchId) : null;
-        if (curSeat) {
-          st.localTransient.x = curSeat.position[0] + Math.sin(curSeat.yaw) * 0.78;
-          st.localTransient.z = curSeat.position[2] + Math.cos(curSeat.yaw) * 0.78;
-          st.localTransient.y = sampleWalkableHeight(st.localTransient.x, st.localTransient.z);
+        // Stand up smoothly and step onto clear walkable ground away from poles/railings
+        const standPos = st.seatedBenchId ? computeBenchStandUpPosition(st.seatedBenchId) : null;
+        if (standPos) {
+          st.localTransient.x = standPos[0];
+          st.localTransient.y = standPos[1];
+          st.localTransient.z = standPos[2];
         }
         st.setSeatedBench(null);
         net.requestBenchSeat(null);
@@ -516,6 +598,11 @@ export function executeInteractPrompt(prompt: InteractPrompt, net: IMultiplayerC
       st.setHeldItem('film_camera');
       net.sendHeldItem('film_camera');
       st.setPhotoMode(true);
+      break;
+    }
+    case 'valley_return': {
+      st.teleportToLandmark('dai-ngam-den');
+      st.showToast('🛵 Đã chở bạn quay lại Đài Ngắm Thung Lũng Đèn!');
       break;
     }
   }

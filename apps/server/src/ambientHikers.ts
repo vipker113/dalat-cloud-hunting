@@ -83,7 +83,7 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
     hairColor: HIGHLAND_PALETTE.hair[0],
     backpack: true,
     heldItem: 'film_camera',
-    walkSpeed: 2.95,
+    walkSpeed: 2.25,
     lateralOffset: 0.45,
     pingPong: true,
     initialWaypointIndex: 2,
@@ -108,7 +108,7 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
     hairColor: HIGHLAND_PALETTE.hair[1],
     backpack: true,
     heldItem: 'phin_coffee',
-    walkSpeed: 3.15,
+    walkSpeed: 2.42,
     lateralOffset: -0.5,
     pingPong: true,
     initialWaypointIndex: 3,
@@ -134,7 +134,7 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
     hairColor: HIGHLAND_PALETTE.hair[2],
     backpack: true,
     heldItem: 'hydrangea_bouquet',
-    walkSpeed: 2.85,
+    walkSpeed: 2.15,
     lateralOffset: 0.25,
     pingPong: true,
     initialWaypointIndex: 0,
@@ -159,7 +159,7 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
     hairColor: HIGHLAND_PALETTE.hair[4],
     backpack: true,
     heldItem: 'guitar',
-    walkSpeed: 3.05,
+    walkSpeed: 2.35,
     lateralOffset: -0.35,
     pingPong: true,
     initialWaypointIndex: 2,
@@ -184,7 +184,7 @@ export const AMBIENT_HIKER_SPECS: AmbientHikerSpec[] = [
     hairColor: HIGHLAND_PALETTE.hair[3],
     backpack: true,
     heldItem: 'roasted_corn',
-    walkSpeed: 2.95,
+    walkSpeed: 2.28,
     lateralOffset: 0.0,
     pingPong: false,
     initialWaypointIndex: 0,
@@ -220,7 +220,7 @@ export class AmbientHikerController {
       this.bots.push({
         spec,
         numericId: allocateNumericId(),
-        active: true,
+        active: false,
         x: wp.x,
         y,
         z: wp.z,
@@ -249,12 +249,13 @@ export class AmbientHikerController {
     added: AmbientHikerRuntime[];
     removed: AmbientHikerRuntime[];
   } {
+    // Gently populate lonely shards (1..5 human explorers) and yield 100% of GPU/network budget once >= 6 humans gather
     const desiredCount =
-      humanCount > 30
+      humanCount <= 0 || humanCount >= 6
         ? 0
-        : humanCount <= 25
-          ? this.bots.length
-          : Math.max(0, 30 - humanCount);
+        : humanCount <= 2
+          ? Math.min(4, this.bots.length)
+          : Math.max(0, 6 - humanCount);
 
     const added: AmbientHikerRuntime[] = [];
     const removed: AmbientHikerRuntime[] = [];

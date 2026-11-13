@@ -14,11 +14,15 @@ import {
 } from '@dalat/protocol';
 import { useGameStore } from '../store/gameStore';
 import { worldColliderRegistry } from '../world/colliderRegistry';
+import { sceneRenderStats } from '../world/sceneRenderStats';
 import type { IMultiplayerController } from '../network/types';
 
 export interface DalatQAHook {
   inspectScene: () => Record<string, unknown>;
+  getRendererStats: () => Record<string, unknown>;
+  getNetworkStats: () => Record<string, unknown>;
   getPlayerState: () => Record<string, unknown>;
+  getUXMetrics: () => Record<string, unknown>;
   teleportPlayer: (opts: { landmarkId?: LandmarkId; position?: [number, number, number]; lookAt?: [number, number, number] }) => Record<string, unknown>;
   inspectCollision: (opts?: { sampleStep?: number }) => Record<string, unknown>;
   triggerInteraction: (action: string, payload?: Record<string, unknown>) => Record<string, unknown>;
@@ -47,30 +51,64 @@ export function installDalatQABridge() {
   const rayDir = new THREE.Vector3(0, -1, 0);
   const ray = new THREE.Ray(rayOrigin, rayDir);
 
+  const readRendererMetrics = () => {
+    const st = useGameStore.getState();
+    const info = boundRenderer?.info;
+    const textures = info?.memory?.textures ?? st.perfMetrics.textures;
+    const geometries = info?.memory?.geometries ?? st.perfMetrics.geometries;
+    const drawCalls =
+      sceneRenderStats.drawCalls > 0
+        ? sceneRenderStats.drawCalls
+        : st.perfMetrics.drawCalls > 0
+          ? st.perfMetrics.drawCalls
+          : (info?.render?.calls ?? 0);
+    const triangles =
+      sceneRenderStats.triangles > 0
+        ? sceneRenderStats.triangles
+        : st.perfMetrics.triangles > 0
+          ? st.perfMetrics.triangles
+          : (info?.render?.triangles ?? 0);
+    const estimatedVramMB = Math.round((geometries * 0.18 + textures * 0.65 + 14.5) * 10) / 10;
+    return {
+      qualityTier: st.qualityTier,
+      fps: st.perfMetrics.fps,
+      frameTimeMs: st.perfMetrics.frameTimeMs,
+      drawCalls,
+      triangles,
+      geometries,
+      textures,
+      estimatedVramMB,
+    };
+  };
+
+  const readNetworkMetrics = () => {
+    const st = useGameStore.getState();
+    return {
+      connected: st.connected,
+      connecting: st.connecting,
+      roomCode: st.roomCode,
+      channelName: st.channelName,
+      roomId: st.roomId,
+      localSessionId: st.localSessionId,
+      rttMs: st.rttMs,
+      peerCount: Object.keys(st.peers).length,
+      farBeaconCount: st.farBeacons.length,
+    };
+  };
+
   window.__DALAT_QA__ = {
+    getRendererStats: () => readRendererMetrics(),
+
+    getNetworkStats: () => readNetworkMetrics(),
+
     inspectScene: () => {
       const st = useGameStore.getState();
-      const info = boundRenderer?.info;
-      const textures = info?.memory?.textures ?? st.perfMetrics.textures;
-      const geometries = info?.memory?.geometries ?? st.perfMetrics.geometries;
-      const drawCalls = info?.render?.calls ?? st.perfMetrics.drawCalls;
-      const triangles = info?.render?.triangles ?? st.perfMetrics.triangles;
-      // Conservative VRAM estimate based on buffers + KTX2/DataTextures
-      const estimatedVramMB = Math.round((geometries * 0.18 + textures * 0.65 + 14.5) * 10) / 10;
+      const renderStats = readRendererMetrics();
+      const netStats = readNetworkMetrics();
 
       return {
-        connected: st.connected,
-        roomCode: st.roomCode,
-        channelName: st.channelName,
-        rttMs: st.rttMs,
-        peerCount: Object.keys(st.peers).length,
-        farBeaconCount: st.farBeacons.length,
-        qualityTier: st.qualityTier,
-        drawCalls,
-        triangles,
-        geometries,
-        textures,
-        estimatedVramMB,
+        ...netStats,
+        ...renderStats,
         gameTime: st.atmosphere.timeLabel,
         weather: st.atmosphere.weather,
       };
@@ -86,6 +124,9 @@ export function installDalatQABridge() {
         yaw: Math.round(lt.yaw * 1000) / 1000,
         cameraYaw: Math.round(lt.cameraYaw * 1000) / 1000,
         cameraPitch: Math.round(lt.cameraPitch * 1000) / 1000,
+        camX: Math.round(lt.camX * 1000) / 1000,
+        camY: Math.round(lt.camY * 1000) / 1000,
+        camZ: Math.round(lt.camZ * 1000) / 1000,
         photoModeActive: st.photoModeActive,
         altitudeASL: gameYToASL(lt.y),
         surfaceType: getSurfaceType(lt.x, lt.z),
@@ -96,6 +137,8 @@ export function installDalatQABridge() {
         heldItem: st.heldItem,
         activeEmote: st.activeEmote,
         seatedBenchId: st.seatedBenchId,
+        occupiedBenches: { ...st.occupiedBenches },
+        nearbyPrompt: st.nearbyPrompt ? { ...st.nearbyPrompt } : null,
         nearbyPeer: st.nearbyPeer,
         previewYaw: Math.round(lt.previewCurrentYaw * 1000) / 1000,
         previewPanY: Math.round(lt.previewCurrentPanY * 1000) / 1000,
@@ -103,6 +146,7 @@ export function installDalatQABridge() {
         peersList: Object.values(st.peers).map((p) => ({
           sessionId: p.sessionId,
           displayName: p.displayName,
+          isBot: Boolean(p.isBot),
           x: Math.round(p.x * 10) / 10,
           y: Math.round(p.y * 10) / 10,
           z: Math.round(p.z * 10) / 10,
@@ -110,6 +154,20 @@ export function installDalatQABridge() {
           heldItem: p.heldItem,
         })),
         discoveredLandmarks: st.discoveredLandmarks,
+      };
+    },
+
+    getUXMetrics: () => {
+      const st = useGameStore.getState();
+      return {
+        uxMetrics: { ...st.uxMetrics },
+        onboardingStep: st.onboardingStep,
+        visitCount: st.visitCount,
+        chatHistoryCount: st.chatHistory.length,
+        unreadChatCount: st.unreadChatCount,
+        polaroidCount: st.polaroids.length,
+        quietMode: st.quietMode,
+        reducedMotion: st.reducedMotion,
       };
     },
 
@@ -124,6 +182,10 @@ export function installDalatQABridge() {
         st.enterWorld();
       }
       const lt = useGameStore.getState().localTransient;
+      boundNet?.sendTeleport?.(lt.x, lt.z, lt.yaw, {
+        y: lt.y,
+        qaOverride: true,
+      });
       boundNet?.sendMove({
         seq: Math.floor(performance.now() / 83) & 0xffff,
         x: lt.x,
@@ -264,6 +326,16 @@ export function installDalatQABridge() {
           st.setPhotoMode(true);
           st.requestPhotoShutter();
           break;
+        case 'set_quality': {
+          const tier = (payload.tier as typeof st.qualityTier) || 'high';
+          st.setQualityTier(tier, false);
+          break;
+        }
+        case 'open_modal': {
+          const modal = (payload.modal as typeof st.activeModal) || 'none';
+          st.setActiveModal(modal);
+          break;
+        }
         default:
           return { ok: false, error: `Unknown action: ${action}` };
       }

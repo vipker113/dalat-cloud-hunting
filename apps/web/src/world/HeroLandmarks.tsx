@@ -313,6 +313,49 @@ export function HeroLandmarks() {
   const lonelyPineY = useMemo(() => sampleGroundHeight(-95, -155), []);
   const cub50Y = useMemo(() => sampleGroundHeight(19.8, 125.2), []);
 
+  // Ground any built-in short stilt poles in cau_go_bridge.glb (local y < -1.2) all the way into solid hillside terrain!
+  useEffect(() => {
+    if (!cauGoScene) return;
+    const clonedGeos: THREE.BufferGeometry[] = [];
+    cauGoScene.traverse((child) => {
+      const mesh = child as THREE.Mesh;
+      if (!mesh.isMesh || !mesh.geometry) return;
+      mesh.geometry.computeBoundingBox();
+      const bb = mesh.geometry.boundingBox;
+      if (!bb || bb.min.y >= -1.2) return;
+
+      const geo = mesh.geometry.clone();
+      const posAttr = geo.getAttribute('position');
+      if (posAttr) {
+        let modified = false;
+        for (let i = 0; i < posAttr.count; i++) {
+          const vy = posAttr.getY(i);
+          if (vy < -1.2) {
+            const vx = posAttr.getX(i);
+            const vz = posAttr.getZ(i);
+            const groundLocalY = sampleGroundHeight(52 + vx, -75 + vz) - 196.15 - 1.35;
+            if (groundLocalY < vy) {
+              posAttr.setY(i, groundLocalY);
+              modified = true;
+            }
+          }
+        }
+        if (modified) {
+          posAttr.needsUpdate = true;
+          geo.computeBoundingBox();
+          geo.computeBoundingSphere();
+          mesh.geometry = geo;
+          clonedGeos.push(geo);
+        } else {
+          geo.dispose();
+        }
+      }
+    });
+    return () => {
+      for (const g of clonedGeos) g.dispose();
+    };
+  }, [cauGoScene]);
+
   // Merge veranda sub-platform + all 24 timber stilts into ONE single GPU draw call!
   const mergedSubstructureGeo = useMemo(() => {
     const parts: THREE.BufferGeometry[] = [];

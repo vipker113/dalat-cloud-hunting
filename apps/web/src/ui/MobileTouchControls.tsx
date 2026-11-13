@@ -1,17 +1,28 @@
-import { useEffect, useRef, useState } from 'react';
-import { ArrowUp } from 'lucide-react';
+import { useEffect, useRef } from 'react';
+import { ArrowUp, Sparkles } from 'lucide-react';
+import { executeInteractPrompt } from '../gameplay/interactions';
+import { useNetController } from '../gameplay/netBridge';
 import { useGameStore } from '../store/gameStore';
-import { GLASS_PILL_STYLE, UI_COLORS } from './uiStyles';
+import { GLASS_PILL_STYLE, UI_COLORS, UI_FONTS } from './uiStyles';
+import { useViewportLayout } from './useViewportLayout';
 
 const JOYSTICK_RADIUS = 48;
+const UI_TOUCH_IGNORE_SELECTOR =
+  '[data-ui-overlay="true"], [data-dalat-drawer="true"], [role="dialog"], button, input, textarea, select, label, a, form, nav';
 
 export function MobileTouchControls() {
+  const net = useNetController();
+  const { isTouchCapable } = useViewportLayout();
+
   const hasEnteredWorld = useGameStore((s) => s.hasEnteredWorld);
   const activeModal = useGameStore((s) => s.activeModal);
   const photoModeActive = useGameStore((s) => s.photoModeActive);
   const qualityTier = useGameStore((s) => s.qualityTier);
+  const nearbyPrompt = useGameStore((s) => s.nearbyPrompt);
+  const seatedBenchId = useGameStore((s) => s.seatedBenchId);
+  const onboardingStep = useGameStore((s) => s.onboardingStep);
 
-  const [isTouchDevice, setIsTouchDevice] = useState(false);
+  const isTouchDevice = isTouchCapable || qualityTier === 'mobile';
 
   // Refs for visual joystick ring updated via DOM styles (0 React re-renders during 60Hz drag!)
   const ringRef = useRef<HTMLDivElement>(null);
@@ -24,14 +35,8 @@ export function MobileTouchControls() {
     lookId: null as number | null,
     lastLookX: 0,
     lastLookY: 0,
+    pinchDist: 0,
   });
-
-  useEffect(() => {
-    const hasTouch =
-      typeof window !== 'undefined' &&
-      ('ontouchstart' in window || navigator.maxTouchPoints > 0 || qualityTier === 'mobile');
-    setIsTouchDevice(hasTouch);
-  }, [qualityTier]);
 
   useEffect(() => {
     if (!isTouchDevice || !hasEnteredWorld || activeModal !== 'none') {
@@ -41,9 +46,15 @@ export function MobileTouchControls() {
       return;
     }
 
-    const showRing = (x: number, y: number, dx: number, dy: number) => {
+    const showRing = (x: number, y: number, dx: number, dy: number, sprinting: boolean) => {
       if (ringRef.current) {
         ringRef.current.style.opacity = '1';
+        ringRef.current.style.borderColor = sprinting
+          ? 'rgba(243, 195, 130, 0.82)'
+          : 'rgba(255, 232, 204, 0.34)';
+        ringRef.current.style.boxShadow = sprinting
+          ? '0 0 18px rgba(243, 195, 130, 0.35)'
+          : 'none';
         ringRef.current.style.transform = `translate3d(${x - JOYSTICK_RADIUS}px, ${y - JOYSTICK_RADIUS}px, 0)`;
       }
       if (knobRef.current) {
@@ -52,25 +63,46 @@ export function MobileTouchControls() {
     };
 
     const hideRing = () => {
-      if (ringRef.current) ringRef.current.style.opacity = '0';
-      if (knobRef.current) knobRef.current.style.transform = 'translate3d(0px, 0px, 0)';
+      if (ringRef.current) {
+        ringRef.current.style.opacity = '0';
+        ringRef.current.style.boxShadow = 'none';
+      }
+      if (knobRef.current) {
+        knobRef.current.style.transform = 'translate3d(0px, 0px, 0)';
+      }
     };
 
     const onTouchStart = (e: TouchEvent) => {
-      // Ignore touches on interactive UI buttons/inputs
+      if (useGameStore.getState().activeModal !== 'none') return;
       const target = e.target as HTMLElement | null;
-      if (target && target.closest('button, input, textarea, form')) return;
+      if (target?.closest(UI_TOUCH_IGNORE_SELECTOR)) return;
 
-      const halfW = window.innerWidth * 0.46;
       const ts = touchState.current;
 
+      // 2-finger pinch-to-zoom initialization when not dragging left-thumb movement joystick
+      if (e.touches.length === 2 && ts.moveId === null) {
+        const t0 = e.touches[0]?.target as HTMLElement | null;
+        const t1 = e.touches[1]?.target as HTMLElement | null;
+        if (t0?.closest(UI_TOUCH_IGNORE_SELECTOR) || t1?.closest(UI_TOUCH_IGNORE_SELECTOR)) {
+          return;
+        }
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        ts.pinchDist = Math.hypot(dx, dy);
+        ts.lookId = null;
+        return;
+      }
+
+      const halfW = window.innerWidth * 0.44;
       for (let i = 0; i < e.changedTouches.length; i++) {
         const t = e.changedTouches[i];
+        const touchTarget = t.target as HTMLElement | null;
+        if (touchTarget?.closest(UI_TOUCH_IGNORE_SELECTOR)) continue;
         if (t.clientX < halfW && ts.moveId === null) {
           ts.moveId = t.identifier;
           ts.originX = t.clientX;
           ts.originY = t.clientY;
-          showRing(t.clientX, t.clientY, 0, 0);
+          showRing(t.clientX, t.clientY, 0, 0, false);
         } else if (t.clientX >= halfW && ts.lookId === null) {
           ts.lookId = t.identifier;
           ts.lastLookX = t.clientX;
@@ -82,7 +114,33 @@ export function MobileTouchControls() {
     const onTouchMove = (e: TouchEvent) => {
       const ts = touchState.current;
       const st = useGameStore.getState();
+      if (st.activeModal !== 'none') return;
+      const target = e.target as HTMLElement | null;
+      if (ts.moveId === null && ts.lookId === null && target?.closest(UI_TOUCH_IGNORE_SELECTOR)) {
+        return;
+      }
       const lt = st.localTransient;
+
+      // 2-finger pinch-to-zoom camera distance
+      if (e.touches.length === 2 && ts.moveId === null && !st.photoModeActive) {
+        const t0 = e.touches[0]?.target as HTMLElement | null;
+        const t1 = e.touches[1]?.target as HTMLElement | null;
+        if (t0?.closest(UI_TOUCH_IGNORE_SELECTOR) || t1?.closest(UI_TOUCH_IGNORE_SELECTOR)) {
+          return;
+        }
+        const dx = e.touches[0].clientX - e.touches[1].clientX;
+        const dy = e.touches[0].clientY - e.touches[1].clientY;
+        const nextDist = Math.hypot(dx, dy);
+        if (ts.pinchDist > 8) {
+          const delta = ts.pinchDist - nextDist;
+          lt.targetCameraDistance = Math.max(
+            1.45,
+            Math.min(8.4, lt.targetCameraDistance + delta * 0.016)
+          );
+        }
+        ts.pinchDist = nextDist;
+        return;
+      }
 
       for (let i = 0; i < e.changedTouches.length; i++) {
         const t = e.changedTouches[i];
@@ -94,21 +152,29 @@ export function MobileTouchControls() {
           const angle = Math.atan2(rawDy, rawDx);
           const kx = Math.cos(angle) * clampedDist;
           const ky = Math.sin(angle) * clampedDist;
+          const normMag = clampedDist / JOYSTICK_RADIUS;
 
           lt.moveInputX = kx / JOYSTICK_RADIUS;
           lt.moveInputZ = ky / JOYSTICK_RADIUS;
-          showRing(ts.originX, ts.originY, kx, ky);
+          showRing(ts.originX, ts.originY, kx, ky, normMag > 0.88);
+          if (normMag > 0.25) {
+            st.advanceOnboarding('move');
+          }
         } else if (t.identifier === ts.lookId) {
           const dx = t.clientX - ts.lastLookX;
           const dy = t.clientY - ts.lastLookY;
           ts.lastLookX = t.clientX;
           ts.lastLookY = t.clientY;
 
-          const sens = st.photoModeActive ? 0.0034 : 0.0052;
+          const baseSens = st.photoModeActive ? 0.0034 : 0.0052;
+          const sens = baseSens * st.cameraSensitivity;
           lt.cameraYaw -= dx * sens;
           const minP = st.photoModeActive ? -0.8 : -0.34;
           const maxP = st.photoModeActive ? 0.9 : 1.0;
           lt.cameraPitch = Math.max(minP, Math.min(maxP, lt.cameraPitch + dy * sens));
+          if (Math.hypot(dx, dy) > 4) {
+            st.advanceOnboarding('look');
+          }
         }
       }
     };
@@ -116,6 +182,10 @@ export function MobileTouchControls() {
     const onTouchEnd = (e: TouchEvent) => {
       const ts = touchState.current;
       const lt = useGameStore.getState().localTransient;
+
+      if (e.touches.length < 2) {
+        ts.pinchDist = 0;
+      }
 
       for (let i = 0; i < e.changedTouches.length; i++) {
         const t = e.changedTouches[i];
@@ -147,8 +217,48 @@ export function MobileTouchControls() {
   if (!isTouchDevice || !hasEnteredWorld || activeModal !== 'none') return null;
 
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 25, pointerEvents: 'none' }}>
-      {/* Whisper-Soft Floating Virtual Joystick Ring (only visible while dragging!) */}
+    <div
+      className="dalat-full-viewport"
+      style={{
+        position: 'fixed',
+        inset: 0,
+        height: 'var(--dl-vh, 100vh)',
+        zIndex: 25,
+        pointerEvents: 'none',
+        fontFamily: UI_FONTS.sans,
+      }}
+    >
+      {/* Resting Ghost Thumb Affordance Ring (Visible during initial 'move' onboarding step) */}
+      {onboardingStep === 'move' && !photoModeActive && (
+        <div
+          aria-hidden="true"
+          style={{
+            position: 'absolute',
+            left: 'calc(var(--dl-safe-left) + 14px)',
+            bottom: 'calc(var(--dl-safe-bottom) + 74px)',
+            width: '76px',
+            height: '76px',
+            borderRadius: '50%',
+            border: '1.5px dashed rgba(243, 195, 130, 0.42)',
+            background: 'rgba(15, 22, 34, 0.28)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            opacity: 0.72,
+          }}
+        >
+          <div
+            style={{
+              width: '26px',
+              height: '26px',
+              borderRadius: '50%',
+              background: 'rgba(243, 195, 130, 0.36)',
+            }}
+          />
+        </div>
+      )}
+
+      {/* Active Floating Virtual Joystick Ring */}
       <div
         ref={ringRef}
         style={{
@@ -158,12 +268,10 @@ export function MobileTouchControls() {
           width: `${JOYSTICK_RADIUS * 2}px`,
           height: `${JOYSTICK_RADIUS * 2}px`,
           borderRadius: '50%',
-          background: 'rgba(18, 25, 38, 0.32)',
-          border: '1px solid rgba(255, 232, 204, 0.28)',
-          backdropFilter: 'blur(6px)',
-          WebkitBackdropFilter: 'blur(6px)',
+          background: 'rgba(15, 22, 34, 0.42)',
+          border: '1.5px solid rgba(255, 232, 204, 0.34)',
           opacity: 0,
-          transition: 'opacity 160ms ease',
+          transition: 'opacity 140ms ease',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
@@ -175,38 +283,83 @@ export function MobileTouchControls() {
             width: '36px',
             height: '36px',
             borderRadius: '50%',
-            background: 'rgba(243, 195, 130, 0.72)',
-            boxShadow: '0 4px 14px rgba(0,0,0,0.35)',
+            background: 'rgba(243, 195, 130, 0.78)',
+            boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
           }}
         />
       </div>
 
-      {/* Subtle Touch Jump Button (hidden in Photo Mode) */}
+      {/* Right-Thumb Ergonomic Cluster: Positioned strictly above the 1-Row Bottom Dock (Zero Overlap!) */}
       {!photoModeActive && (
-        <button
-          type="button"
-          aria-label="Nhảy"
-          onTouchStart={(e) => {
-            e.stopPropagation();
-            useGameStore.getState().localTransient.jumpRequested = true;
-          }}
+        <div
+          data-testid="mobile-thumb-cluster"
+          data-ui-overlay="true"
+          onTouchStart={(e) => e.stopPropagation()}
+          onTouchMove={(e) => e.stopPropagation()}
           style={{
-            ...GLASS_PILL_STYLE,
             position: 'absolute',
-            right: '22px',
-            bottom: '88px',
-            width: '48px',
-            height: '48px',
-            borderRadius: '50%',
+            right: 'var(--dl-safe-right)',
+            bottom: 'calc(var(--dl-safe-bottom) + 72px)',
             display: 'flex',
+            flexDirection: 'column',
             alignItems: 'center',
-            justifyContent: 'center',
-            color: UI_COLORS.warmAmber,
+            gap: '10px',
             pointerEvents: 'auto',
           }}
         >
-          <ArrowUp size={20} />
-        </button>
+          {nearbyPrompt && !seatedBenchId && (
+            <button
+              type="button"
+              aria-label={nearbyPrompt.label}
+              title={nearbyPrompt.label}
+              onClick={() => executeInteractPrompt(nearbyPrompt, net)}
+              className="dalat-glass-btn"
+              style={{
+                ...GLASS_PILL_STYLE,
+                width: '48px',
+                height: '48px',
+                padding: 0,
+                borderRadius: '50%',
+                border: `1.5px solid ${UI_COLORS.warmAmber}`,
+                background: 'rgba(40, 30, 20, 0.88)',
+                color: UI_COLORS.warmAmber,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                boxShadow: '0 8px 22px rgba(243, 195, 130, 0.25)',
+              }}
+            >
+              <Sparkles size={20} strokeWidth={2.1} />
+            </button>
+          )}
+
+          <button
+            type="button"
+            aria-label="Nhảy"
+            data-testid="mobile-jump-btn"
+            onTouchStart={(e) => {
+              e.stopPropagation();
+              useGameStore.getState().localTransient.jumpRequested = true;
+            }}
+            onClick={() => {
+              useGameStore.getState().localTransient.jumpRequested = true;
+            }}
+            className="dalat-glass-btn"
+            style={{
+              ...GLASS_PILL_STYLE,
+              width: '48px',
+              height: '48px',
+              padding: 0,
+              borderRadius: '50%',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              color: UI_COLORS.warmAmber,
+            }}
+          >
+            <ArrowUp size={20} />
+          </button>
+        </div>
       )}
     </div>
   );

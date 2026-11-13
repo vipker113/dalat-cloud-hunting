@@ -183,27 +183,29 @@ export function sampleGroundHeight(x: number, z: number): number {
     if (dist < minTrailDist) {
       minTrailDist = dist;
     }
-    if (dist < 9.5) {
+    if (dist < 15.0) {
       const segY = ya + (yb - ya) * t;
-      const w = Math.pow(1 - dist / 9.5, 3) / (dist * dist + 0.35);
+      const w = Math.pow(1 - dist / 15.0, 3) / (dist * dist + 0.45);
       weightedTrailY += segY * w;
       weightSum += w;
     }
   }
   const gradedTrailY = weightSum > 0 ? weightedTrailY / weightSum : h;
 
-  // Subtle terraced steps on Cầu Đất tea slopes (away from trails & plateaus)
+  // Subtle C1-continuous terraced contour waves on Cầu Đất tea slopes (zero discontinuous `if` cliffs!)
   const teaZone = gaussian2D(x, z, 36, -58, 66, 66) * (1 - flattenWeight);
-  if (teaZone > 0.22 && minTrailDist > 6.5) {
+  const teaFeather = smoothstep(0.16, 0.38, teaZone) * smoothstep(6.0, 12.5, minTrailDist);
+  if (teaFeather > 0.001) {
     const stepH = 1.65;
-    const terraced =
-      Math.floor(h / stepH) * stepH + smoothstep(0.0, 0.48, (h % stepH) / stepH) * stepH;
-    h = h * (1 - teaZone * 0.62) + terraced * (teaZone * 0.62);
+    const phase = (((h % stepH) + stepH) % stepH) / stepH;
+    const terraced = Math.floor(h / stepH) * stepH + smoothstep(0.0, 0.78, phase) * stepH;
+    const wTea = teaZone * teaFeather * 0.34;
+    h = h * (1 - wTea) + terraced * wTea;
   }
 
-  // Smooth graded red-basalt trail embankment (< 24 deg guaranteed everywhere!)
-  if (minTrailDist < 9.0) {
-    const trailBlend = 1 - smoothstep(2.8, 9.0, minTrailDist);
+  // Wide, silky-smooth graded red-basalt trail shoulder (< 24 deg on trail, gentle grassy shoulder)
+  if (minTrailDist < 14.5) {
+    const trailBlend = 1 - smoothstep(2.8, 14.5, minTrailDist);
     h = h * (1 - trailBlend) + gradedTrailY * trailBlend;
   }
 
@@ -232,16 +234,18 @@ export function sampleGroundHeight(x: number, z: number): number {
 export function sampleWalkableHeight(x: number, z: number): number {
   const ground = sampleGroundHeight(x, z);
 
-  // 1. Cầu Gỗ Săn Mây wooden bridge (x=52..84.5 ramp + flat circular sunrise deck centered at 91,-75 at y=198.28m)
-  if (x >= 50 && x <= 98.5 && Math.abs(z - -75) <= 7.0) {
+  // 1. Cầu Gỗ Săn Mây wooden bridge (smooth approach x=47.8..52 -> ramp x=52..84.5 + circular sunrise deck at 91,-75 y=198.28m)
+  if (x >= 47.8 && x <= 98.5 && Math.abs(z - -75) <= 7.0) {
     const distDeck = Math.hypot(x - 91, z - -75);
     if (distDeck <= 6.75) {
       return Math.max(ground, 198.28);
     }
-    if (x <= 85.0 && Math.abs(z - -75) <= 2.7) {
+    if (x <= 85.2 && Math.abs(z - -75) <= 2.7) {
+      const entryBlend = smoothstep(47.8, 52.0, x);
       const rampY = 196.15 + clamp(x - 52, 0, 32.5) * 0.0525;
       const deckBlend = smoothstep(83.2, 84.6, x);
-      const bridgeY = rampY * (1 - deckBlend) + 198.28 * deckBlend;
+      const targetDeckY = rampY * (1 - deckBlend) + 198.28 * deckBlend;
+      const bridgeY = ground * (1 - entryBlend) + targetDeckY * entryBlend;
       return Math.max(ground, bridgeY);
     }
   }
@@ -251,13 +255,54 @@ export function sampleWalkableHeight(x: number, z: number): number {
     return Math.max(ground, 135.307);
   }
 
+  // 3. Gác Chè Cổ 1927 weathered timber pavilion deck at (-21, -181), 4.2m x 3.6m rotated yaw = 0.65 rad, top = gacCheGroundY + 0.5m
+  const dxGac = x - -21;
+  const dzGac = z - -181;
+  if (dxGac * dxGac + dzGac * dzGac <= 9.0) {
+    const cosY = Math.cos(0.65);
+    const sinY = Math.sin(0.65);
+    const lx = dxGac * cosY - dzGac * sinY;
+    const lz = dxGac * sinY + dzGac * cosY;
+    if (Math.abs(lx) <= 2.15 && Math.abs(lz) <= 1.85) {
+      const gacTopY = sampleGroundHeight(-21, -181) + 0.5;
+      return Math.max(ground, gacTopY);
+    }
+  }
+
   return ground;
 }
 
+/**
+ * Finite-difference terrain gradient vector (dh/dx, dh/dz) & slope tangent magnitude.
+ * Used to prevent unrealistic sprinting straight up >46-deg cliffs and to filter cliff-side tea bushes.
+ */
+export function sampleGroundGradient(
+  x: number,
+  z: number,
+  eps = 0.6
+): { dhdx: number; dhdz: number; slopeTan: number; normalY: number } {
+  const hx1 = sampleGroundHeight(x + eps, z);
+  const hx0 = sampleGroundHeight(x - eps, z);
+  const hz1 = sampleGroundHeight(x, z + eps);
+  const hz0 = sampleGroundHeight(x, z - eps);
+  const dhdx = (hx1 - hx0) / (2 * eps);
+  const dhdz = (hz1 - hz0) / (2 * eps);
+  const slopeTan = Math.hypot(dhdx, dhdz);
+  const normalY = 1 / Math.sqrt(1 + slopeTan * slopeTan);
+  return { dhdx, dhdz, slopeTan, normalY };
+}
+
 export function getSurfaceType(x: number, z: number): SurfaceType {
+  const dxGac = x - -21;
+  const dzGac = z - -181;
+  const onGacChe =
+    dxGac * dxGac + dzGac * dzGac <= 9.0 &&
+    Math.abs(dxGac * Math.cos(0.65) - dzGac * Math.sin(0.65)) <= 2.15 &&
+    Math.abs(dxGac * Math.sin(0.65) + dzGac * Math.cos(0.65)) <= 1.85;
   if (
     (x >= 50 && x <= 98.5 && (Math.abs(z - -75) <= 2.7 || Math.hypot(x - 91, z - -75) <= 6.75)) ||
-    (x >= -51.85 && x <= -24.15 && z >= 19.65 && z <= 40.35)
+    (x >= -51.85 && x <= -24.15 && z >= 19.65 && z <= 40.35) ||
+    onGacChe
   ) {
     return 'wood_deck';
   }

@@ -28,7 +28,9 @@ export function composeLocalMatrix(
 }
 
 /**
- * Converts any BufferGeometry into non-indexed vertex-colored geometry with optional gradient shading.
+ * Converts any BufferGeometry into non-indexed vertex-colored geometry with optional gradient shading,
+ * preserving analytical smooth normals on curved surfaces (spheres, cylinders, tori, cones) and crisp
+ * split normals on box faces and cylinder caps.
  */
 export function paintPart(
   src: THREE.BufferGeometry,
@@ -36,9 +38,11 @@ export function paintPart(
   matrix?: THREE.Matrix4,
   bottomHex?: string
 ): THREE.BufferGeometry {
+  if (!src.getAttribute('normal')) {
+    src.computeVertexNormals();
+  }
   const g = src.index ? src.toNonIndexed() : src.clone();
   if (matrix) g.applyMatrix4(matrix);
-  g.computeVertexNormals();
 
   const pos = g.getAttribute('position') as THREE.BufferAttribute;
   const norm = g.getAttribute('normal') as THREE.BufferAttribute;
@@ -79,11 +83,55 @@ export function mergePainted(parts: THREE.BufferGeometry[]): THREE.BufferGeometr
   return merged;
 }
 
-export const SHARED_VCOLOR_MAT = new THREE.MeshStandardMaterial({
-  vertexColors: true,
-  roughness: 0.74,
-  metalness: 0.06,
-});
+export const SHARED_VCOLOR_MAT = (() => {
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.82,
+    metalness: 0.03,
+  });
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        varying vec3 vFabricLocalPos;`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+        vFabricLocalPos = position;`
+      );
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        '#include <common>',
+        `#include <common>
+        varying vec3 vFabricLocalPos;`
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+        vec3 weaveCoord = vFabricLocalPos * 115.0;
+        float warp = sin(weaveCoord.x + sin(weaveCoord.y * 0.5) * 0.8);
+        float weft = sin(weaveCoord.y * 1.15 + weaveCoord.z * 0.9);
+        float weaveGrain = warp * weft * 0.5 + 0.5;
+        diffuseColor.rgb *= mix(0.94, 1.05, weaveGrain);`
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+        roughnessFactor = clamp(roughnessFactor + (weaveGrain - 0.5) * 0.12, 0.45, 0.96);`
+      )
+      .replace(
+        '#include <opaque_fragment>',
+        `float clothRim = pow(1.0 - saturate(dot(geometryNormal, geometryViewDir)), 3.2);
+        vec3 fuzzTint = mix(diffuseColor.rgb * 1.28, vec3(1.0, 0.86, 0.68), 0.38);
+        outgoingLight += fuzzTint * clothRim * 0.18;
+        #include <opaque_fragment>`
+      );
+  };
+  mat.customProgramCacheKey = () => 'dalat-woven-vcolor-fabric-v2';
+  return mat;
+})();
 
 export const SHARED_METALLIC_VCOLOR_MAT = new THREE.MeshStandardMaterial({
   vertexColors: true,
@@ -488,8 +536,8 @@ export const SHARED_HELD_PROPS = (() => {
     phinCup: new THREE.CylinderGeometry(0.041, 0.035, 0.092, 20),
     lanternGlobe: new THREE.SphereGeometry(0.056, 14, 12),
     lanternHalo: new THREE.SphereGeometry(0.115, 12, 10),
-    vaporPuff: new THREE.SphereGeometry(0.026, 10, 8),
-    shadowBlob: new THREE.CircleGeometry(0.38, 20),
+    vaporPuff: new THREE.SphereGeometry(0.032, 14, 12),
+    shadowBlob: new THREE.CircleGeometry(0.46, 28),
   };
 })();
 
