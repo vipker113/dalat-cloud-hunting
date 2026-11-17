@@ -245,6 +245,34 @@ export function SoundscapeController() {
       fireBedGain.connect(masterGain);
       fireSrc.start(0, 3.3);
 
+      // 4. Vintage 49cc 4-stroke Honda Super Cub 50 engine synth (gentle muffled purr, 0 gain when walking)
+      const cubEngineOsc = ctx.createOscillator();
+      cubEngineOsc.type = 'sawtooth';
+      cubEngineOsc.frequency.value = 34;
+
+      const cubSubOsc = ctx.createOscillator();
+      cubSubOsc.type = 'triangle';
+      cubSubOsc.frequency.value = 68;
+
+      const cubSubMix = ctx.createGain();
+      cubSubMix.gain.value = 0.55;
+
+      const cubFilter = ctx.createBiquadFilter();
+      cubFilter.type = 'lowpass';
+      cubFilter.frequency.value = 240;
+      cubFilter.Q.value = 1.65;
+
+      const cubGain = ctx.createGain();
+      cubGain.gain.value = 0.0;
+
+      cubEngineOsc.connect(cubFilter);
+      cubSubOsc.connect(cubSubMix);
+      cubSubMix.connect(cubFilter);
+      cubFilter.connect(cubGain);
+      cubGain.connect(masterGain);
+      cubEngineOsc.start();
+      cubSubOsc.start();
+
       if (!st.audioEnabled || document.hidden) {
         void ctx.suspend().catch(() => {});
       } else if (fromGesture && ctx.state === 'suspended') {
@@ -259,6 +287,10 @@ export function SoundscapeController() {
         windBandpass,
         drizzleGain,
         fireBedGain,
+        cubEngineOsc,
+        cubSubOsc,
+        cubFilter,
+        cubGain,
         activeTransientSources: new Set<AudioScheduledSourceNode>(),
       };
       engineRef.current = created;
@@ -316,14 +348,49 @@ export function SoundscapeController() {
       const atmo = st.atmosphere;
       const player = st.localTransient;
 
-      // Altitude & windStrength modulated Highland Pine Wind
+      // Altitude, windStrength & high-speed Super Cub rush modulated Highland Pine Wind
+      const isOnScooter =
+        st.localVehicleRole === 'driver' || st.localVehicleRole === 'passenger';
+      const speedKmh = isOnScooter ? Math.max(0, player.scooterSpeedKmh) : 0;
+      const speedRush = clamp01((speedKmh - 18) / 46); // Ramps smoothly from 18 km/h -> 64 km/h
       const altFactor = clamp01((player.y - 75) / 125); // 0 in deep slope -> 1 on Cầu Gỗ summit
       const gustWave = 0.85 + 0.15 * Math.sin(nowMs * 0.0009) * Math.cos(nowMs * 0.00037);
-      const targetWindCutoff = (360 + altFactor * 420 + atmo.windStrength * 260) * gustWave;
-      const targetWindVol = (0.045 + altFactor * 0.055 + atmo.windStrength * 0.065) * gustWave;
+      const targetWindCutoff =
+        (360 + altFactor * 420 + atmo.windStrength * 260 + speedRush * 640) * gustWave;
+      const targetWindVol =
+        (0.045 + altFactor * 0.055 + atmo.windStrength * 0.065 + speedRush * 0.085) * gustWave;
 
-      eng.windBandpass.frequency.setTargetAtTime(targetWindCutoff, nowAudio, 0.18);
-      eng.windGain.gain.setTargetAtTime(targetWindVol, nowAudio, 0.18);
+      eng.windBandpass.frequency.setTargetAtTime(targetWindCutoff, nowAudio, 0.14);
+      eng.windGain.gain.setTargetAtTime(targetWindVol, nowAudio, 0.14);
+
+      // Vintage 49cc 4-speed Super Cub engine modulation
+      if (isOnScooter && !st.quietMode) {
+        const gear = player.scooterGear || 1;
+        const gearMins = [0, 0, 12, 26, 41];
+        const gearSpans = [1, 14, 16, 17, 26];
+        const withinGear = clamp01((speedKmh - gearMins[gear]) / gearSpans[gear]);
+        const uphillStrain = Math.max(0, player.scooterPitchRad) * 14;
+        const airFreeSpin = player.scooterAirborne ? 14 : 0;
+        const idleFlutter = speedKmh < 2.5 ? Math.sin(nowMs * 0.026) * 2.2 : 0;
+
+        const targetHz =
+          speedKmh < 1.5
+            ? 33 + idleFlutter
+            : 42 + gear * 8 + withinGear * 44 - uphillStrain + airFreeSpin;
+        const clampedHz = Math.max(28, Math.min(132, targetHz));
+
+        eng.cubEngineOsc.frequency.setTargetAtTime(clampedHz, nowAudio, 0.075);
+        eng.cubSubOsc.frequency.setTargetAtTime(clampedHz * 2.0, nowAudio, 0.075);
+        eng.cubFilter.frequency.setTargetAtTime(
+          220 + withinGear * 280 + speedRush * 190,
+          nowAudio,
+          0.09
+        );
+        const targetCubGain = speedKmh < 1.5 ? 0.022 : 0.032 + clamp01(speedKmh / 62) * 0.026;
+        eng.cubGain.gain.setTargetAtTime(targetCubGain, nowAudio, 0.08);
+      } else {
+        eng.cubGain.gain.setTargetAtTime(0.0, nowAudio, 0.09);
+      }
 
       // Soft drizzle whisper
       const targetDrizzleVol = atmo.drizzleIntensity > 0.05 ? atmo.drizzleIntensity * 0.065 : 0.0;

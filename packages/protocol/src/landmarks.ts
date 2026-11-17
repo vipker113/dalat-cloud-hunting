@@ -1,4 +1,5 @@
-import { sampleWalkableHeight, gameYToASL } from './terrain';
+import { sampleWalkableHeight, sampleGroundHeight, gameYToASL } from './terrain';
+import type { ScooterPaintId } from './types';
 
 export type LandmarkId =
   | 'quan-mo-suong'
@@ -168,4 +169,189 @@ export function resolveBenchSeatTransform(rawSeatOrBenchId: string): {
     position: [x, bench.position[1], z],
     yaw: bench.yaw,
   };
+}
+
+export interface StationScooterSpec {
+  scooterId: string;
+  label: string;
+  paintId: ScooterPaintId;
+  plateLabel: string;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+}
+
+export const STATION_SCOOTERS: ReadonlyArray<StationScooterSpec> = [
+  {
+    scooterId: 'cub-station-cafe-1',
+    label: 'Super Cub 50 Đầu Đường Đất Đỏ Mơ Sương #1',
+    paintId: 'moss_green',
+    plateLabel: '49-AA 1968',
+    x: -51.2,
+    y: sampleGroundHeight(-51.2, 42.2),
+    z: 42.2,
+    yaw: -0.04,
+  },
+  {
+    scooterId: 'cub-station-cafe-2',
+    label: 'Super Cub 50 Đầu Đường Đất Đỏ Mơ Sương #2',
+    paintId: 'mist_cream',
+    plateLabel: '49-AB 1979',
+    x: -51.2,
+    y: sampleGroundHeight(-51.2, 45.6),
+    z: 45.6,
+    yaw: -0.04,
+  },
+  {
+    scooterId: 'cub-station-den-1',
+    label: 'Super Cub 50 Đài Ngắm Đèn',
+    paintId: 'moss_green',
+    plateLabel: '49-AA 0520',
+    x: 19.8,
+    y: sampleGroundHeight(19.8, 125.2),
+    z: 125.2,
+    yaw: 0.88,
+  },
+  {
+    scooterId: 'cub-station-cau-go-1',
+    label: 'Super Cub 50 Đầu Cầu Gỗ Cầu Đất',
+    paintId: 'plum_red',
+    plateLabel: '49-AC 1927',
+    x: 46.2,
+    y: sampleGroundHeight(46.2, -72.5),
+    z: -72.5,
+    yaw: 1.52,
+  },
+  {
+    scooterId: 'cub-station-thong-1',
+    label: 'Super Cub 50 Đồi Thông Cô Đơn',
+    paintId: 'peace_blue',
+    plateLabel: '49-AD 2167',
+    x: -89.5,
+    y: sampleGroundHeight(-89.5, -138.0),
+    z: -138.0,
+    yaw: -0.45,
+  },
+];
+
+export const LANDMARK_SCOOTER_PARKING: Record<
+  LandmarkId,
+  { x: number; y: number; z: number; yaw: number }
+> = {
+  'quan-mo-suong': {
+    x: -51.0,
+    y: sampleGroundHeight(-51.0, 48.6),
+    z: 48.6,
+    yaw: -0.04,
+  },
+  'cau-go-san-may': {
+    x: 44.8,
+    y: sampleGroundHeight(44.8, -74.5),
+    z: -74.5,
+    yaw: Math.PI / 2,
+  },
+  'cay-thong-co-don': {
+    x: -89.5,
+    y: sampleGroundHeight(-89.5, -139.5),
+    z: -139.5,
+    yaw: -0.35,
+  },
+  'dai-ngam-den': {
+    x: 23.2,
+    y: sampleGroundHeight(23.2, 124.2),
+    z: 124.2,
+    yaw: 1.65,
+  },
+  'gac-che-1927': {
+    x: -12.5,
+    y: sampleGroundHeight(-12.5, -172.0),
+    z: -172.0,
+    yaw: 1.35,
+  },
+};
+
+export interface PedestrianZoneCheck {
+  inside: boolean;
+  pushX: number;
+  pushZ: number;
+  zoneLabel: string;
+}
+
+/**
+ * Checks whether (x, z) intrudes into one of the 3 peaceful wooden pedestrian sanctuaries
+ * (Cầu Gỗ Săn Mây, Hiên Gỗ Tiệm Cà Phê Mơ Sương, Vòng Bếp Lửa Acoustic) and returns a smooth
+ * outward boundary normal + clamped position so scooters stop politely outside!
+ */
+export function checkPedestrianDeckZone(x: number, z: number): PedestrianZoneCheck {
+  // 1. Cầu Gỗ Săn Mây Cầu Đất wooden pier & eastern viewing deck (x in [50.2, 102.5], z in [-81.2, -68.8])
+  if (x >= 50.2 && x <= 102.5 && z >= -81.2 && z <= -68.8) {
+    const dWest = x - 50.2;
+    const distNorth = z - -81.2;
+    const distSouth = -68.8 - z;
+    if (dWest <= distNorth && dWest <= distSouth) {
+      return {
+        inside: true,
+        pushX: 50.05,
+        pushZ: z,
+        zoneLabel: 'Cầu Gỗ Săn Mây Cầu Đất',
+      };
+    }
+    if (distNorth < distSouth) {
+      return {
+        inside: true,
+        pushX: x,
+        pushZ: -81.35,
+        zoneLabel: 'Cầu Gỗ Săn Mây Cầu Đất',
+      };
+    }
+    return {
+      inside: true,
+      pushX: x,
+      pushZ: -68.65,
+      zoneLabel: 'Cầu Gỗ Săn Mây Cầu Đất',
+    };
+  }
+
+  // 2. Hiên Gỗ Tiệm Cà Phê Mơ Sương wooden veranda & cabin (x in [-52.2, -24.2], z in [19.4, 40.6])
+  // Note: East edge (x = -24.4) is a raised cliff railing, so push out toward the flat South/North/West courtyard!
+  if (x >= -52.2 && x <= -24.2 && z >= 19.4 && z <= 40.6) {
+    const dWest = x - -52.2;
+    const dNorth = z - 19.4;
+    const dSouth = 40.6 - z;
+    const m = Math.min(dWest, dNorth, dSouth);
+    if (m === dSouth) {
+      return {
+        inside: true,
+        pushX: Math.min(-26.5, x),
+        pushZ: 41.1,
+        zoneLabel: 'Hiên Gỗ Tiệm Cà Phê Mơ Sương',
+      };
+    }
+    if (m === dNorth) {
+      return {
+        inside: true,
+        pushX: Math.min(-26.5, x),
+        pushZ: 18.9,
+        zoneLabel: 'Hiên Gỗ Tiệm Cà Phê Mơ Sương',
+      };
+    }
+    return { inside: true, pushX: -52.6, pushZ: z, zoneLabel: 'Hiên Gỗ Tiệm Cà Phê Mơ Sương' };
+  }
+
+  // 3. Acoustic Campfire Guitar Circle at [-53, 24], radius 4.6m
+  const dx = x - -53.0;
+  const dz = z - 24.0;
+  const rSq = dx * dx + dz * dz;
+  if (rSq < 4.6 * 4.6) {
+    const r = Math.sqrt(rSq) || 0.001;
+    return {
+      inside: true,
+      pushX: -53.0 + (dx / r) * 4.7,
+      pushZ: 24.0 + (dz / r) * 4.7,
+      zoneLabel: 'Vòng Bếp Lửa Acoustic',
+    };
+  }
+
+  return { inside: false, pushX: x, pushZ: z, zoneLabel: '' };
 }

@@ -137,6 +137,16 @@ export function installDalatQABridge() {
         heldItem: st.heldItem,
         activeEmote: st.activeEmote,
         seatedBenchId: st.seatedBenchId,
+        localVehicleId: st.localVehicleId,
+        localVehicleRole: st.localVehicleRole,
+        scooterSpeedKmh: Math.round(lt.scooterSpeedKmh * 10) / 10,
+        scooterGear: lt.scooterGear,
+        scooterPitchRad: Math.round(lt.scooterPitchRad * 1000) / 1000,
+        scooterBankRad: Math.round(lt.scooterBankRad * 1000) / 1000,
+        scooterAirborne: lt.scooterAirborne,
+        scooterDrifting: lt.scooterDrifting,
+        scootersCount: Object.keys(st.scooters).length,
+        incomingRideInvite: st.incomingRideInvite,
         occupiedBenches: { ...st.occupiedBenches },
         nearbyPrompt: st.nearbyPrompt ? { ...st.nearbyPrompt } : null,
         nearbyPeer: st.nearbyPeer,
@@ -152,6 +162,8 @@ export function installDalatQABridge() {
           z: Math.round(p.z * 10) / 10,
           emote: p.emote,
           heldItem: p.heldItem,
+          vehicleId: p.vehicleId,
+          vehicleRole: p.vehicleRole,
         })),
         discoveredLandmarks: st.discoveredLandmarks,
       };
@@ -334,6 +346,38 @@ export function installDalatQABridge() {
         case 'open_modal': {
           const modal = (payload.modal as typeof st.activeModal) || 'none';
           st.setActiveModal(modal);
+          break;
+        }
+        case 'summon_scooter': {
+          boundNet?.summonScooter();
+          break;
+        }
+        case 'mount_scooter': {
+          const scooterId = String(payload.scooterId || '');
+          const role = payload.role === 'passenger' ? 'mount_passenger' : 'mount_driver';
+          if (scooterId) boundNet?.interactScooter(scooterId, role);
+          break;
+        }
+        case 'dismount_scooter': {
+          if (st.localVehicleId) {
+            boundNet?.interactScooter(st.localVehicleId, 'dismount');
+          }
+          break;
+        }
+        case 'invite_ride': {
+          const targetSessionId = String(payload.targetSessionId || '');
+          if (targetSessionId) {
+            boundNet?.sendSocialInteract(targetSessionId, 'invite_ride');
+          }
+          break;
+        }
+        case 'accept_ride': {
+          const scooterId = String(
+            payload.scooterId || st.incomingRideInvite?.scooterId || ''
+          );
+          if (scooterId) {
+            boundNet?.acceptScooterInvite(scooterId);
+          }
           break;
         }
         default:

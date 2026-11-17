@@ -103,6 +103,18 @@ const offlineFallbackController: IMultiplayerController = {
     }
     st.setNetworkStatus({ occupiedBenches: nextOccupied });
   },
+  summonScooter() {
+    // Handled by multiplayerClient offline fallback when active
+  },
+  interactScooter() {
+    // Handled by multiplayerClient offline fallback when active
+  },
+  acceptScooterInvite() {
+    useGameStore.getState().setIncomingRideInvite(null);
+  },
+  sendScooterHorn() {
+    // No-op when uninitialized
+  },
   sendJamNote(chordIndex, instrument) {
     const st = useGameStore.getState();
     st.setLastJamNote({

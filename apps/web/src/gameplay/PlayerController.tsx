@@ -10,7 +10,13 @@ import {
   sampleWalkableHeight,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
-import { playLandingFootstep, playStrideFootstep } from '../audio/highlandAudio';
+import {
+  playKickstandClack,
+  playLandingFootstep,
+  playScooterHorn,
+  playScooterLandingThump,
+  playStrideFootstep,
+} from '../audio/highlandAudio';
 import type { IMultiplayerController } from '../network/types';
 import { useGameStore } from '../store/gameStore';
 import { worldColliderRegistry } from '../world/colliderRegistry';
@@ -24,6 +30,15 @@ import {
   triggerGuitarChord,
 } from './interactions';
 import { useNetController } from './netBridge';
+import {
+  createInitialScooterPhysicsState,
+  type ScooterPhysicsState,
+  stepScooterPhysics,
+} from './scooterPhysics';
+import {
+  computeFrameScooterPoses,
+  setLocalDriverPhysicsPose,
+} from './SuperCub50Vehicle';
 
 // Zero-GC module-level scratch math primitives
 const _invMat = new THREE.Matrix4();
@@ -105,8 +120,21 @@ function resolveGameKeyCode(e: KeyboardEvent): string {
     const decoded = decodeTelexKeyFromComposedChar(rawKey);
     if (decoded) return decoded;
   }
-  if (code === 'KeyA' && rawKey.length === 1 && /^[b-z0-9]$/.test(rawKey)) {
-    return /^[b-z]$/.test(rawKey) ? `Key${rawKey.toUpperCase()}` : `Digit${rawKey}`;
+  if (code === 'KeyA') {
+    if (rawKey.length === 1 && /^[b-z0-9]$/.test(rawKey)) {
+      return /^[b-z]$/.test(rawKey) ? `Key${rawKey.toUpperCase()}` : `Digit${rawKey}`;
+    }
+    // Never mistake EVKey virtualKey=0 ('Process' / 'Dead' / composing) for physical KeyA!
+    if (
+      e.isComposing ||
+      e.keyCode === 229 ||
+      e.which === 229 ||
+      rawKey === 'process' ||
+      rawKey === 'dead' ||
+      rawKey === 'unidentified'
+    ) {
+      return '';
+    }
   }
 
   // 2. Trust genuine physical USB HID e.code
@@ -172,6 +200,10 @@ function resolveGameKeyCode(e: KeyboardEvent): string {
         return 'KeyJ';
       case 79:
         return 'KeyO';
+      case 88:
+        return 'KeyX';
+      case 76:
+        return 'KeyL';
     }
   }
 
@@ -234,6 +266,12 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
 
   const camActualDistRef = useRef(4.35);
   const wasAirborneRef = useRef(false);
+  const scooterPhysRef = useRef<ScooterPhysicsState | null>(null);
+  const lastVehicleIdRef = useRef<string | null>(null);
+  const wasScooterAirborneRef = useRef(false);
+  const lastPedToastMsRef = useRef(0);
+  const prevWallFrameMsRef = useRef(0);
+  const lastMouseLookMsRef = useRef(0);
 
   const timersRef = useRef({
     lastNetSendMs: 0,
@@ -378,6 +416,15 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
           }
           return;
         }
+        if (st.localVehicleRole === 'driver') {
+          keysRef.current.space = true;
+          return;
+        }
+        if (st.localVehicleRole === 'passenger' && st.localVehicleId && !e.repeat) {
+          playKickstandClack();
+          net.interactScooter(st.localVehicleId, 'dismount');
+          return;
+        }
         st.localTransient.jumpRequested = true;
         return;
       }
@@ -413,8 +460,49 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         return;
       }
 
-      // Context Interaction [E]
+      // Super Cub 50 Shortcuts: [X] Summon/Stow, [F] Dismount, [H] Horn, [L] Headlight, [V] Passenger Pose
+      if (!e.repeat && !st.photoModeActive && st.activeModal === 'none') {
+        if (code === 'KeyX') {
+          playKickstandClack();
+          net.summonScooter();
+          return;
+        }
+        if (code === 'KeyF' && st.localVehicleRole !== 'none' && st.localVehicleId) {
+          playKickstandClack();
+          net.interactScooter(st.localVehicleId, 'dismount');
+          return;
+        }
+        if (code === 'KeyH' && st.localVehicleRole === 'driver') {
+          playScooterHorn(1.0);
+          net.sendScooterHorn();
+          return;
+        }
+        if (code === 'KeyL' && st.localVehicleRole === 'driver' && st.localVehicleId) {
+          net.interactScooter(st.localVehicleId, 'toggle_light');
+          return;
+        }
+        if (code === 'KeyV' && st.localVehicleRole === 'passenger' && st.localVehicleId) {
+          net.interactScooter(st.localVehicleId, 'toggle_pose');
+          return;
+        }
+      }
+
+      // Context Interaction [E] (Accept Ride Invite / Dismount when stopped / Interact Prompt / Greet Peer)
       if (code === 'KeyE' && !e.repeat && !st.photoModeActive && st.activeModal === 'none') {
+        if (st.incomingRideInvite && st.localVehicleRole === 'none') {
+          playKickstandClack();
+          net.acceptScooterInvite(st.incomingRideInvite.scooterId);
+          return;
+        }
+        if (
+          st.localVehicleId &&
+          (st.localVehicleRole === 'passenger' ||
+            (st.localVehicleRole === 'driver' && st.localTransient.scooterSpeedKmh < 4.5))
+        ) {
+          playKickstandClack();
+          net.interactScooter(st.localVehicleId, 'dismount');
+          return;
+        }
         if (st.nearbyPrompt) {
           executeInteractPrompt(st.nearbyPrompt, net);
         } else if (st.nearbyPeer) {
@@ -495,31 +583,77 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const hwCode = e.code || '';
       const rawKey = (e.key || '').toLowerCase();
 
-      // 1. Physical Shift release
+      // 1. Physical Shift or Space release
       if (hwCode === 'ShiftLeft' || hwCode === 'ShiftRight' || rawKey === 'shift') {
         keysRef.current.shift = Boolean(e.shiftKey);
         return;
       }
+      if (hwCode === 'Space' || rawKey === ' ') {
+        keysRef.current.space = false;
+        return;
+      }
 
-      // 2. Ignore synthetic EVKey / OpenKey / Unikey Backspace & CGEventKeyboardSetUnicodeString keyups:
-      // EVKey/OpenKey posts synthetic Backspace + virtualKey=0 ('KeyA') keydown+keyup bursts in <2ms with
-      // e.shiftKey === false, whereas genuine physical kCGEventKeyUp passes through untouched!
+      // 2. Always honor physical KeyW / KeyS / KeyD / Arrow releases immediately (even during Telex 'ư'/'đ'!)
+      if (hwCode === 'KeyW' || hwCode === 'ArrowUp') {
+        keysRef.current.forward = false;
+        return;
+      }
+      if (hwCode === 'KeyS' || hwCode === 'ArrowDown') {
+        keysRef.current.backward = false;
+        return;
+      }
+      if (hwCode === 'KeyD' || hwCode === 'ArrowRight') {
+        keysRef.current.right = false;
+        return;
+      }
+      if (hwCode === 'ArrowLeft') {
+        keysRef.current.left = false;
+        return;
+      }
+
+      // 3. Ignore synthetic EVKey / OpenKey Backspace & virtualKey=0 ('KeyA') bursts for OTHER keys ('ư', 'w', 's', 'd'),
+      // while ALWAYS releasing physical KeyA when the user releases 'a' / 'ă' / 'â' / 'á'!
       if (hwCode === 'Backspace' || rawKey === 'backspace') {
         return;
       }
       if (hwCode === 'KeyA' && rawKey === 'a' && pendingSyntheticAKeyUp) {
         pendingSyntheticAKeyUp = false;
-        return;
+        if (now - lastBackspaceMs < 24) {
+          return;
+        }
       }
       const isNonAsciiChar = rawKey.length === 1 && rawKey.charCodeAt(0) > 127;
-      const isCarbonVirtualZeroKeyUp =
-        hwCode === 'KeyA' && rawKey.length === 1 && rawKey !== 'a';
+      if (hwCode === 'KeyA') {
+        // Ignore ONLY synthetic EVKey virtualKey=0 keyups emitted for NON-'A' keys ('ư', 'ơ', 'đ', 'w', 's', 'd')
+        // right after EVKey's synthetic Backspace! Always release physical KeyA on 'a', 'ă', 'â', 'á'.., 'Dead', 'Process'!
+        if (/^[b-z0-9]$/.test(rawKey)) {
+          return;
+        }
+        if (isNonAsciiChar) {
+          const nfdBase = rawKey.normalize('NFD')[0] || '';
+          if (nfdBase !== 'a') {
+            return;
+          }
+          if (now - lastBackspaceMs < 24) {
+            return;
+          }
+        }
+        keysRef.current.left = false;
+        return;
+      }
+
       if (
-        isCarbonVirtualZeroKeyUp ||
-        (isNonAsciiChar && (hwCode === 'KeyA' || !hwCode || hwCode === 'Unidentified')) ||
+        (isNonAsciiChar && (!hwCode || hwCode === 'Unidentified')) ||
         ((e.isComposing || e.keyCode === 229 || e.which === 229) &&
           (!hwCode || hwCode === 'Unidentified'))
       ) {
+        if (isNonAsciiChar) {
+          const decoded = decodeTelexKeyFromComposedChar(rawKey);
+          if (decoded === 'KeyW') keysRef.current.forward = false;
+          if (decoded === 'KeyS') keysRef.current.backward = false;
+          if (decoded === 'KeyA') keysRef.current.left = false;
+          if (decoded === 'KeyD') keysRef.current.right = false;
+        }
         return;
       }
 
@@ -528,27 +662,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         keysRef.current.shift = false;
       }
 
-      // 3. Always trust physical USB HID e.code first so releasing A/S/D never cancels a held W key under Telex!
-      if (hwCode && hwCode !== 'Unidentified') {
-        if (hwCode === 'KeyW' || hwCode === 'ArrowUp') {
-          keysRef.current.forward = false;
-          return;
-        }
-        if (hwCode === 'KeyS' || hwCode === 'ArrowDown') {
-          keysRef.current.backward = false;
-          return;
-        }
-        if (hwCode === 'KeyA' || hwCode === 'ArrowLeft') {
-          keysRef.current.left = false;
-          return;
-        }
-        if (hwCode === 'KeyD' || hwCode === 'ArrowRight') {
-          keysRef.current.right = false;
-          return;
-        }
-      }
-
-      // 4. Fallback only when hardware e.code is missing (e.g. legacy Windows IME VK_PACKET)
+      // 4. Fallback only when hardware e.code is missing
       const code = resolveGameKeyCode(e);
       if (code === 'KeyW' || code === 'ArrowUp') keysRef.current.forward = false;
       if (code === 'KeyS' || code === 'ArrowDown') keysRef.current.backward = false;
@@ -669,9 +783,15 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
 
       const baseSens = st.photoModeActive ? 0.0024 : isLocked ? 0.0029 : 0.0042;
       const sens = baseSens * st.cameraSensitivity;
+      if (Math.abs(dx) > 0.2) {
+        lastMouseLookMsRef.current = performance.now();
+      }
       st.localTransient.cameraYaw -= dx * sens;
-      const minPitch = st.photoModeActive ? -0.85 : -0.34;
-      const maxPitch = st.photoModeActive ? 0.95 : 0.98;
+      const isRidingNow =
+        (st.localVehicleRole === 'driver' || st.localVehicleRole === 'passenger') &&
+        Boolean(st.localVehicleId);
+      const minPitch = st.photoModeActive ? -0.85 : isRidingNow ? -0.14 : -0.34;
+      const maxPitch = st.photoModeActive ? 0.95 : isRidingNow ? 0.44 : 0.98;
       st.localTransient.cameraPitch = THREE.MathUtils.clamp(
         st.localTransient.cameraPitch + dy * sens,
         minPitch,
@@ -763,6 +883,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       // Two-finger horizontal trackpad pan rotates camera yaw smoothly in third-person mode
       if (!e.ctrlKey && Math.abs(e.deltaX) > Math.abs(e.deltaY) * 1.1 && Math.abs(e.deltaX) > 0.4) {
         e.preventDefault();
+        lastMouseLookMsRef.current = performance.now();
         st.localTransient.cameraYaw -= e.deltaX * 0.0042 * st.cameraSensitivity;
         st.advanceOnboarding('look');
         return;
@@ -815,9 +936,18 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     };
   }, [gl, net]);
 
-  useFrame(({ clock }, rawDt) => {
-    const dt = Math.min(rawDt, 0.05);
+  useFrame((_, rawDt) => {
     const nowMs = performance.now();
+    const wallDt =
+      prevWallFrameMsRef.current > 0
+        ? (nowMs - prevWallFrameMsRef.current) * 0.001
+        : rawDt;
+    prevWallFrameMsRef.current = nowMs;
+    const dt = THREE.MathUtils.clamp(
+      wallDt > 0.0005 && wallDt < 0.25 ? wallDt : rawDt,
+      0.001,
+      0.05
+    );
     const st = useGameStore.getState();
     const lt = st.localTransient;
     const tState = timersRef.current;
@@ -870,7 +1000,8 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     }
 
     if (!st.hasEnteredWorld) {
-      const elapsed = clock.getElapsedTime();
+      computeFrameScooterPoses(dt);
+      const elapsed = nowMs * 0.001;
       const baseFloorY = sampleWalkableHeight(lt.x, lt.z);
       lt.y = Math.max(baseFloorY, 135.31);
 
@@ -909,10 +1040,12 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     }
 
     // Snap camera cleanly on fast-travel teleport
+    let justTeleported = false;
     if (st.teleportTarget && st.teleportTarget.nonce !== tState.lastTeleportNonce) {
       tState.lastTeleportNonce = st.teleportTarget.nonce;
       _photoOffset.set(0, 0, 0);
       oState.initialized = false;
+      justTeleported = true;
     }
 
     // Reset photo camera offset when entering Photo Mode (keep exact third-person gaze direction!)
@@ -957,6 +1090,9 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const ry = deadzone(pad.axes[3] || 0);
       if (!modalBlocking && (rx !== 0 || ry !== 0)) {
         const gpLookRate = (st.photoModeActive ? 1.5 : 2.35) * st.cameraSensitivity;
+        if (Math.abs(rx) > 0.02) {
+          lastMouseLookMsRef.current = nowMs;
+        }
         lt.cameraYaw -= rx * gpLookRate * dt;
         const minP = st.photoModeActive ? -0.85 : -0.34;
         const maxP = st.photoModeActive ? 0.95 : 0.98;
@@ -1022,8 +1158,213 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     const rawLen = Math.hypot(rawInX, rawInZ);
     const inputMag = Math.min(1, rawLen);
 
-    // In Photo Mode, WASD gently pans the viewfinder within a cozy 3.2m tripod leash around the player
-    if (st.photoModeActive) {
+    const isDrivingScooter =
+      st.localVehicleRole === 'driver' && Boolean(st.localVehicleId);
+    const isPassengerScooter =
+      st.localVehicleRole === 'passenger' && Boolean(st.localVehicleId);
+
+    if (isDrivingScooter && st.localVehicleId) {
+      let phys = scooterPhysRef.current;
+      const poseCorrected =
+        phys !== null && Math.hypot(phys.x - lt.x, phys.z - lt.z) > 4.5;
+      if (
+        !phys ||
+        lastVehicleIdRef.current !== st.localVehicleId ||
+        justTeleported ||
+        poseCorrected
+      ) {
+        phys = createInitialScooterPhysicsState(lt.x, lt.y, lt.z, lt.yaw);
+        scooterPhysRef.current = phys;
+        lastVehicleIdRef.current = st.localVehicleId;
+        wasScooterAirborneRef.current = false;
+      }
+
+      const surfaceNow = getSurfaceType(lt.x, lt.z);
+      const wetBasaltNow =
+        surfaceNow === 'red_basalt_trail' &&
+        (st.atmosphere.drizzleIntensity > 0.2 || st.atmosphere.weather === 'light_drizzle');
+
+      const rawKbThrottle = (keys.forward ? 1 : 0) - (keys.backward ? 1 : 0);
+      const rawKbSteer = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+      const stickThrottle = -(lt.moveInputZ + gpMoveZ);
+      const stickSteer = lt.moveInputX + gpMoveX;
+      const manualSteer = THREE.MathUtils.clamp(rawKbSteer + stickSteer, -1, 1);
+
+      let rawThrottle = 0;
+      let rawSteer = 0;
+
+      if (!movementBlocked && !st.photoModeActive) {
+        rawThrottle = THREE.MathUtils.clamp(rawKbThrottle + stickThrottle, -1, 1);
+        if (Math.abs(manualSteer) > 0.04) {
+          rawSteer = manualSteer;
+        }
+      }
+
+      const boostHeld =
+        !movementBlocked &&
+        !st.photoModeActive &&
+        (keys.shift || gpSprint || Math.hypot(lt.moveInputX, lt.moveInputZ) > 0.88);
+      const handbrakeActive =
+        !movementBlocked &&
+        !st.photoModeActive &&
+        (keys.space || lt.handbrakeHeld);
+
+      stepScooterPhysics(
+        phys,
+        {
+          throttle: rawThrottle,
+          steer: rawSteer,
+          boost: boostHeld,
+          handbrake: handbrakeActive,
+        },
+        dt,
+        wetBasaltNow ? Math.max(0.35, st.atmosphere.drizzleIntensity) : 0
+      );
+
+      if (!phys.grounded && phys.airborneTimeSec > 0.08) {
+        wasScooterAirborneRef.current = true;
+      } else if (phys.grounded && wasScooterAirborneRef.current) {
+        wasScooterAirborneRef.current = false;
+        playScooterLandingThump(Math.max(0.28, phys.landingImpact));
+      }
+
+      if (phys.pedestrianBlockedZone && nowMs - lastPedToastMsRef.current > 3600) {
+        lastPedToastMsRef.current = nowMs;
+        st.showToast(
+          `🪵 Khu đi bộ (${phys.pedestrianBlockedZone}) — Vui lòng dựng xe bên ngoài nhé!`
+        );
+      }
+
+      lt.x = phys.x;
+      lt.y = phys.y;
+      lt.z = phys.z;
+      lt.yaw = phys.yaw;
+      lt.vx = phys.vx;
+      lt.vy = phys.vy;
+      lt.vz = phys.vz;
+      lt.grounded = phys.grounded;
+      lt.moving = phys.speedKmh > 1.2;
+      lt.running = phys.speedKmh > 38;
+      lt.jumpRequested = false;
+      lt.scooterSpeedKmh = phys.speedKmh;
+      lt.scooterGear = phys.gear;
+      lt.scooterSteerRad = phys.steerAngle;
+      lt.scooterPitchRad = phys.pitch;
+      lt.scooterBankRad = phys.bankRoll;
+      lt.scooterAirborne = !phys.grounded;
+      lt.scooterDrifting = phys.drifting;
+      lt.scooterBraking = phys.braking;
+      lt.scooterLandingImpact = phys.landingImpact;
+
+      if (lt.moving) {
+        st.advanceOnboarding('move');
+      }
+
+      // Smooth chase-camera follow behind rider shoulders when not actively orbiting camera with mouse
+      if (
+        !oState.dragging &&
+        nowMs - lastMouseLookMsRef.current > 1100 &&
+        !st.photoModeActive &&
+        phys.forwardSpeed > 1.5
+      ) {
+        const chaseYaw = phys.yaw + Math.PI;
+        lt.cameraYaw += shortestAngleDiff(lt.cameraYaw, chaseYaw) * (1 - Math.exp(-2.0 * dt));
+        const desiredChasePitch = THREE.MathUtils.clamp(0.20 - phys.pitch * 0.35, 0.08, 0.38);
+        if (lt.cameraPitch < desiredChasePitch) {
+          lt.cameraPitch += (desiredChasePitch - lt.cameraPitch) * (1 - Math.exp(-3.0 * dt));
+        }
+      }
+
+      setLocalDriverPhysicsPose(st.localVehicleId, phys);
+      computeFrameScooterPoses(dt);
+
+      if (st.photoModeActive && inputMag > 0.02 && rawLen > 0.001 && !st.latestCapturedPolaroid) {
+        const forwardX = -Math.sin(lt.cameraYaw);
+        const forwardZ = -Math.cos(lt.cameraYaw);
+        const rightX = Math.cos(lt.cameraYaw);
+        const rightZ = -Math.sin(lt.cameraYaw);
+        const nx = rawInX / rawLen;
+        const nz = rawInZ / rawLen;
+        _photoOffset.x += (rightX * nx + forwardX * -nz) * 3.2 * inputMag * dt;
+        _photoOffset.z += (rightZ * nx + forwardZ * -nz) * 3.2 * inputMag * dt;
+        if (_photoOffset.length() > 3.2) _photoOffset.setLength(3.2);
+      }
+    } else if (isPassengerScooter && st.localVehicleId) {
+      scooterPhysRef.current = null;
+      lastVehicleIdRef.current = null;
+      setLocalDriverPhysicsPose(null, null);
+
+      const poses = computeFrameScooterPoses(dt);
+      const pose = poses.get(st.localVehicleId);
+      if (pose) {
+        if (!pose.grounded) {
+          wasScooterAirborneRef.current = true;
+        } else if (wasScooterAirborneRef.current) {
+          wasScooterAirborneRef.current = false;
+          playScooterLandingThump(Math.max(0.25, pose.landingImpact));
+        }
+
+        const fwdX = Math.sin(pose.yaw);
+        const fwdZ = Math.cos(pose.yaw);
+        lt.x = pose.pillionAnchorPos.x;
+        lt.y = pose.y;
+        lt.z = pose.pillionAnchorPos.z;
+        lt.yaw = pose.yaw;
+        lt.vx = fwdX * pose.forwardSpeed;
+        lt.vy = 0;
+        lt.vz = fwdZ * pose.forwardSpeed;
+        lt.grounded = pose.grounded;
+        lt.moving = pose.speedKmh > 1.2;
+        lt.running = pose.speedKmh > 38;
+        lt.jumpRequested = false;
+        lt.scooterSpeedKmh = pose.speedKmh;
+        lt.scooterGear =
+          pose.speedKmh >= 41 ? 4 : pose.speedKmh >= 26 ? 3 : pose.speedKmh >= 12 ? 2 : 1;
+        lt.scooterSteerRad = pose.steerAngle;
+        lt.scooterPitchRad = pose.pitch;
+        lt.scooterBankRad = pose.bankRoll;
+        lt.scooterAirborne = !pose.grounded;
+        lt.scooterDrifting = pose.isDrifting;
+        lt.scooterBraking = pose.isBraking;
+        lt.scooterLandingImpact = pose.landingImpact;
+
+        if (!oState.dragging && !st.photoModeActive && pose.speedKmh > 8) {
+          const chaseYaw = pose.yaw + Math.PI;
+          lt.cameraYaw += shortestAngleDiff(lt.cameraYaw, chaseYaw) * (1 - Math.exp(-1.5 * dt));
+        }
+      }
+
+      if (st.photoModeActive && inputMag > 0.02 && rawLen > 0.001 && !st.latestCapturedPolaroid) {
+        const forwardX = -Math.sin(lt.cameraYaw);
+        const forwardZ = -Math.cos(lt.cameraYaw);
+        const rightX = Math.cos(lt.cameraYaw);
+        const rightZ = -Math.sin(lt.cameraYaw);
+        const nx = rawInX / rawLen;
+        const nz = rawInZ / rawLen;
+        _photoOffset.x += (rightX * nx + forwardX * -nz) * 3.2 * inputMag * dt;
+        _photoOffset.z += (rightZ * nx + forwardZ * -nz) * 3.2 * inputMag * dt;
+        if (_photoOffset.length() > 3.2) _photoOffset.setLength(3.2);
+      }
+    } else {
+      if (scooterPhysRef.current || lastVehicleIdRef.current) {
+        scooterPhysRef.current = null;
+        lastVehicleIdRef.current = null;
+        wasScooterAirborneRef.current = false;
+        setLocalDriverPhysicsPose(null, null);
+        lt.scooterSpeedKmh = 0;
+        lt.scooterGear = 1;
+        lt.scooterSteerRad = 0;
+        lt.scooterPitchRad = 0;
+        lt.scooterBankRad = 0;
+        lt.scooterAirborne = false;
+        lt.scooterDrifting = false;
+        lt.scooterBraking = false;
+        lt.scooterLandingImpact = 0;
+      }
+      computeFrameScooterPoses(dt);
+
+      // In Photo Mode, WASD gently pans the viewfinder within a cozy 3.2m tripod leash around the player
+      if (st.photoModeActive) {
       lt.moving = false;
       lt.running = false;
       lt.vx = 0;
@@ -1440,6 +1781,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
           tState.strideDistAccum = 0.52;
         }
       }
+      }
     }
 
     // 6. Cinematic Horizon Framing, Wardrobe Live Portrait Camera & Zero-Rubber-Band Third-Person Orbit
@@ -1569,21 +1911,37 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const isScenicOverlook =
         nearPierTip || nearValleyOverlook || nearLonelyPine || nearPinkHollow;
 
-      const sprintFovBoost = !st.reducedMotion && lt.running ? 2.5 : 0;
-      const targetFov = (isScenicOverlook && !st.reducedMotion ? 58 : 52) + sprintFovBoost;
+      const isRidingScooter = isDrivingScooter || isPassengerScooter;
+      const speedRatio = isRidingScooter
+        ? THREE.MathUtils.clamp(lt.scooterSpeedKmh / 62, 0, 1.15)
+        : 0;
+      const scooterFovBoost =
+        isRidingScooter && !st.reducedMotion
+          ? speedRatio * 9.5 + (lt.scooterAirborne ? 2.5 : 0)
+          : 0;
+      const sprintFovBoost =
+        !isRidingScooter && !st.reducedMotion && lt.running ? 2.5 : 0;
+      const targetFov =
+        (isScenicOverlook && !st.reducedMotion ? 58 : 52) + sprintFovBoost + scooterFovBoost;
       oState.currentFov += (targetFov - oState.currentFov) * (1 - Math.exp(-5.0 * dt));
 
       oState.targetDistance = lt.targetCameraDistance;
       const scenicDistBoost = isScenicOverlook ? 0.65 : 0;
+      const scooterDistBoost = isRidingScooter ? 0.45 + speedRatio * 0.85 : 0;
       oState.distance +=
-        (oState.targetDistance + scenicDistBoost - oState.distance) * (1 - Math.exp(-11 * dt));
+        (oState.targetDistance + scenicDistBoost + scooterDistBoost - oState.distance) *
+        (1 - Math.exp(-11 * dt));
 
       const strideCamBob =
-        !st.reducedMotion && lt.grounded && lt.moving && !st.seatedBenchId
+        !isRidingScooter && !st.reducedMotion && lt.grounded && lt.moving && !st.seatedBenchId
           ? Math.sin(tState.stridePhaseRad * 2) * (lt.running ? 0.011 : 0.0055)
           : 0;
+      const scooterLandingDip = isRidingScooter ? -lt.scooterLandingImpact * 0.085 : 0;
       const pivotLift =
-        (st.seatedBenchId ? 1.24 : 1.48) + (isScenicOverlook ? 0.34 : 0) + strideCamBob;
+        (st.seatedBenchId ? 1.24 : isRidingScooter ? 1.38 : 1.48) +
+        (isScenicOverlook ? 0.34 : 0) +
+        strideCamBob +
+        scooterLandingDip;
       _camPivot.set(lt.x, lt.y + pivotLift, lt.z);
 
       const wasUninitialized = !oState.initialized;
@@ -1592,11 +1950,16 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         oState.smoothFloorLift = 0;
         oState.initialized = true;
       } else {
-        // Lock XZ pivot 1:1 to velocity-smoothed player position so avatar never jitters relative to camera!
-        const yBlend = 1 - Math.exp(-18 * dt);
+        // Lock XZ pivot 1:1 to player position; track Y tightly on scooters so 60 km/h slopes never lag!
+        const yBlend = 1 - Math.exp((isRidingScooter ? -42 : -18) * dt);
         oState.smoothPivot.x = _camPivot.x;
         oState.smoothPivot.z = _camPivot.z;
         oState.smoothPivot.y += (_camPivot.y - oState.smoothPivot.y) * yBlend;
+      }
+
+      // Keep riding chase pitch within comfortable horizon range [-0.14, 0.44] so camera never points straight down into grass
+      if (isRidingScooter) {
+        lt.cameraPitch = THREE.MathUtils.clamp(lt.cameraPitch, -0.14, 0.44);
       }
 
       // Compute spherical orbit direction from smoothPivot
@@ -1604,7 +1967,18 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
       const dirX = Math.sin(lt.cameraYaw) * cosPitch;
       const dirY = Math.sin(lt.cameraPitch);
       const dirZ = Math.cos(lt.cameraYaw) * cosPitch;
-      const desiredDist = oState.distance;
+      let desiredDist = oState.distance;
+
+      // On steep downhill slopes, tuck the riding camera closer so the uphill embankment behind the rider
+      // never pushes the camera high above the scooter and out of frame!
+      if (isRidingScooter) {
+        const probeBackX = oState.smoothPivot.x + dirX * desiredDist;
+        const probeBackZ = oState.smoothPivot.z + dirZ * desiredDist;
+        const backSlopeRise = Math.max(0, sampleGroundHeight(probeBackX, probeBackZ) - lt.y - 0.65);
+        if (backSlopeRise > 0) {
+          desiredDist = Math.max(2.65, desiredDist - backSlopeRise * 0.58);
+        }
+      }
 
       // Ideal unobstructed camera position
       _camDesired.set(
@@ -1613,9 +1987,11 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         oState.smoothPivot.z + dirZ * desiredDist
       );
 
-      // Wall/Cabin Spring-Arm BVH Raycast from (lt.x, lt.y + 1.42, lt.z) toward _camDesired
+      // Wall/Cabin Spring-Arm BVH Raycast (use ObstacleCollider while riding so hillside facets never pump zoom!)
       let targetCamDist = desiredDist;
-      const camCollider = worldColliderRegistry.getCollider();
+      const camCollider = isRidingScooter
+        ? worldColliderRegistry.getObstacleCollider()
+        : worldColliderRegistry.getCollider();
       if (camCollider) {
         const { mesh, bvh } = camCollider;
         mesh.updateMatrixWorld();
@@ -1661,29 +2037,50 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         oState.smoothPivot.z + dirZ * actualDist
       );
 
-      // Under-Deck +7..13m Snap Fix: check both walkable deck height and natural ground height!
+      // Under-Deck +7..13m Snap Fix: ONLY treat walkH as an elevated stilted deck when walkH > groundH + 1.15!
+      // (Previously on steep natural hillsides where walkH === groundH > lt.y + 1.5, walkH - 0.45 buried camera underground!)
       const walkH = sampleWalkableHeight(_camDesired.x, _camDesired.z);
       const groundH = sampleGroundHeight(_camDesired.x, _camDesired.z);
-      if (lt.y < walkH - 1.5) {
-        // Player is underneath an elevated stilted deck — never snap camera up onto walkH!
+      const isElevatedDeckAtCam = walkH > groundH + 1.15;
+      if (isElevatedDeckAtCam && lt.y < walkH - 1.5) {
+        // Player is genuinely underneath an elevated stilted wooden deck — keep camera under deck ceiling & above dirt!
         oState.smoothFloorLift = 0;
-        _camDesired.y = Math.min(walkH - 0.45, Math.max(groundH + 0.52, _camDesired.y));
+        _camDesired.y = Math.min(walkH - 0.45, Math.max(groundH + 0.58, _camDesired.y));
       } else {
-        const minCamY = walkH + 0.62;
+        const surfaceFloorY = isElevatedDeckAtCam ? walkH : groundH;
+        const minCamY = surfaceFloorY + (isRidingScooter ? 0.72 : 0.62);
         const neededLift = Math.max(0, minCamY - _camDesired.y);
         oState.smoothFloorLift +=
           (neededLift - oState.smoothFloorLift) * (1 - Math.exp(-20 * dt));
         _camDesired.y += oState.smoothFloorLift;
       }
 
+      // Smooth analytical C² mound clearance along sightline (0 facet jitter!) so convex hill crests never hide the rider
+      if (isRidingScooter) {
+        for (const frac of [0.38, 0.68]) {
+          const mx = oState.smoothPivot.x + (_camDesired.x - oState.smoothPivot.x) * frac;
+          const mz = oState.smoothPivot.z + (_camDesired.z - oState.smoothPivot.z) * frac;
+          const rayY = oState.smoothPivot.y + (_camDesired.y - oState.smoothPivot.y) * frac;
+          const moundY = sampleGroundHeight(mx, mz) + 0.48;
+          if (rayY < moundY) {
+            _camDesired.y += (moundY - rayY) / frac;
+          }
+        }
+      }
+
+      // Anchor lookAt right through the rider's torso when on a scooter (0.24m lead instead of 1.15m)
+      // so even on steep 35-45° downhill slopes, the Super Cub 50 & Rider NEVER drop off the bottom of the screen!
+      const lookLeadDist = isRidingScooter ? 0.24 : 1.15;
+      const lookDropY = isRidingScooter ? 0.22 : 0.06;
       _camLookAt.set(
-        oState.smoothPivot.x - Math.sin(lt.cameraYaw) * 1.15,
-        oState.smoothPivot.y - 0.06,
-        oState.smoothPivot.z - Math.cos(lt.cameraYaw) * 1.15
+        oState.smoothPivot.x - Math.sin(lt.cameraYaw) * lookLeadDist,
+        oState.smoothPivot.y - lookDropY,
+        oState.smoothPivot.z - Math.cos(lt.cameraYaw) * lookLeadDist
       );
 
       camera.position.copy(_camDesired);
       camera.lookAt(_camLookAt);
+      camera.updateMatrixWorld();
       lt.cameraOccludesSelf = actualDist < 0.88;
     }
 
@@ -1738,6 +2135,7 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
     if (nowMs - tState.lastNetSendMs >= NET_SEND_INTERVAL_MS) {
       tState.lastNetSendMs = nowMs;
       tState.moveSeq = (tState.moveSeq + 1) & 0xffff;
+      const activeSc = st.localVehicleId ? st.scooters[st.localVehicleId] : undefined;
       net.sendMove({
         seq: tState.moveSeq,
         x: lt.x,
@@ -1750,6 +2148,10 @@ export function PlayerController({ net: propNet }: PlayerControllerProps) {
         running: lt.running,
         grounded: lt.grounded,
         warmBuff: st.warmthRemainingSec > 0,
+        isDriving: isDrivingScooter,
+        isPassenger: isPassengerScooter,
+        isBraking: isDrivingScooter && lt.scooterBraking,
+        headlightOn: activeSc ? activeSc.headlightOn : true,
       });
     }
   });

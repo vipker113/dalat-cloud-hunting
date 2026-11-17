@@ -80,31 +80,6 @@ function AdaptiveQualityAndAtmosphereGovernor() {
       }
     }
 
-    // 0b. One-time satin-enamel roughness polish on Vintage Super Cub 50 once its mesh mounts
-    const cubGroup = scene.getObjectByName('Landmark_VintageCub50');
-    const cubRoot = cubGroup?.children[0];
-    if (cubRoot && !cubRoot.userData.__cubRoughnessTuned) {
-      cubRoot.userData.__cubRoughnessTuned = true;
-      cubRoot.traverse((node) => {
-        const mesh = node as THREE.Mesh;
-        if (!mesh.isMesh || !mesh.material) return;
-        const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
-        for (let i = 0; i < mats.length; i++) {
-          const m = mats[i] as THREE.MeshStandardMaterial;
-          if (m && typeof m.roughness === 'number') {
-            m.roughness = Math.max(m.roughness, 0.44);
-            if (typeof m.metalness === 'number') {
-              m.metalness = Math.min(m.metalness, 0.58);
-            }
-            if (typeof m.envMapIntensity === 'number') {
-              m.envMapIntensity = Math.min(m.envMapIntensity, 0.68);
-            }
-            m.needsUpdate = true;
-          }
-        }
-      });
-    }
-
     // 1. Update 3D atmosphere continuously in-place at 4 Hz, and only notify Zustand/React HUD
     // when UI-visible fields (clock minute, weather, integer temp, warmth second, expired bubble) actually change!
     atmoAccumSecRef.current += dt;

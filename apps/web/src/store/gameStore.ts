@@ -11,13 +11,22 @@ import {
   getCoatGender,
   HeldItemId,
   LANDMARK_LIST,
+  LANDMARK_SCOOTER_PARKING,
   LANDMARKS,
   LandmarkId,
+  PassengerPoseStyle,
   PlayerOutfit,
   PolaroidEntry,
   resolveEffectiveGender,
+  resolveEffectiveScooterPaint,
   sampleWalkableHeight,
+  ScooterPaintId,
+  ScooterStateSnapshot,
   SocialInteractKind,
+  STATION_SCOOTERS,
+  VehicleHornEvent,
+  VehicleRideInvite,
+  VehicleRole,
   WeatherStateId,
   WindChimeNote,
 } from '@dalat/protocol';
@@ -63,6 +72,8 @@ export interface RemotePeerState {
   heldItem: HeldItemId;
   emote: EmoteId;
   seatId: string;
+  vehicleId: string;
+  vehicleRole: VehicleRole;
   isBot: boolean;
   // Latest interpolated world transform updated inside useFrame without React re-render
   x: number;
@@ -75,6 +86,10 @@ export interface RemotePeerState {
   running: boolean;
   grounded: boolean;
   warmBuff: boolean;
+  isDriving?: boolean;
+  isPassenger?: boolean;
+  isBraking?: boolean;
+  headlightOn?: boolean;
   lastNearSnapMs?: number;
   inNearAoi?: boolean;
 }
@@ -117,6 +132,17 @@ export interface LocalPlayerTransient {
   camY: number;
   camZ: number;
   cameraOccludesSelf: boolean;
+  // High-frequency live scooter telemetry read by HUD & avatar IK (0 React re-renders per frame!)
+  scooterSpeedKmh: number;
+  scooterGear: 1 | 2 | 3 | 4;
+  scooterSteerRad: number;
+  scooterPitchRad: number;
+  scooterBankRad: number;
+  scooterAirborne: boolean;
+  scooterDrifting: boolean;
+  scooterBraking: boolean;
+  scooterLandingImpact: number;
+  handbrakeHeld: boolean;
 }
 
 export interface PerfMetricsSnapshot {
@@ -140,8 +166,11 @@ export interface InteractPrompt {
     | 'wind_chime'
     | 'acoustic_jam'
     | 'cub_photo'
-    | 'valley_return';
+    | 'valley_return'
+    | 'mount_scooter';
   benchId?: string;
+  scooterId?: string;
+  scooterTargetRole?: 'driver' | 'passenger';
   position: [number, number, number];
 }
 
@@ -185,6 +214,8 @@ export interface GameStoreState {
   heldItem: HeldItemId;
   activeEmote: EmoteId;
   seatedBenchId: string | null;
+  localVehicleId: string | null;
+  localVehicleRole: VehicleRole;
   warmthRemainingSec: number; // >0 grants Highland Warmth cozy buff!
 
   // Networking
@@ -200,6 +231,9 @@ export interface GameStoreState {
   farBeacons: FarPeerBeacon[];
   availableChannels: RoomChannelInfo[];
   occupiedBenches: Record<string, string>; // benchId -> sessionId
+  scooters: Record<string, ScooterStateSnapshot>;
+  lastHornEvent: VehicleHornEvent | null;
+  incomingRideInvite: VehicleRideInvite | null;
 
   // Mutable high-frequency transient ref read/written inside useFrame (0 React re-renders!)
   localTransient: LocalPlayerTransient;
@@ -263,6 +297,12 @@ export interface GameStoreState {
   setHeldItem: (item: HeldItemId) => void;
   triggerEmote: (emote: EmoteId) => void;
   setSeatedBench: (benchId: string | null) => void;
+  setLocalVehicleState: (vehicleId: string | null, role: VehicleRole) => void;
+  setScootersMap: (scooters: Record<string, ScooterStateSnapshot>) => void;
+  upsertScooter: (scooter: ScooterStateSnapshot) => void;
+  removeScooter: (scooterId: string) => void;
+  setLastHornEvent: (evt: VehicleHornEvent | null) => void;
+  setIncomingRideInvite: (invite: VehicleRideInvite | null) => void;
   grantWarmthBuff: (seconds?: number) => void;
   tickWarmthAndAtmosphere: (dtSec: number) => void;
   teleportTo: (position: [number, number, number], lookAt?: [number, number, number]) => void;
@@ -579,6 +619,29 @@ const initialQualityTier: QualityTier =
     ? 'mobile'
     : 'high';
 
+function buildInitialStationScooters(): Record<string, ScooterStateSnapshot> {
+  const map: Record<string, ScooterStateSnapshot> = {};
+  for (let i = 0; i < STATION_SCOOTERS.length; i++) {
+    const s = STATION_SCOOTERS[i];
+    map[s.scooterId] = {
+      scooterId: s.scooterId,
+      kind: 'station',
+      ownerSessionId: '',
+      paintId: s.paintId,
+      plateLabel: s.plateLabel,
+      driverSessionId: '',
+      passengerSessionId: '',
+      passengerPose: 'hold_waist',
+      headlightOn: true,
+      parkedX: s.x,
+      parkedY: s.y,
+      parkedZ: s.z,
+      parkedYaw: s.yaw,
+    };
+  }
+  return map;
+}
+
 syncBodyDataAttributes(initialQualityTier, initialPersisted.reducedMotion);
 
 export const useGameStore = create<GameStoreState>((set, get) => ({
@@ -587,10 +650,15 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   visitCount: initialPersisted.visitCount,
   onboardingStep: initialPersisted.onboardingDone ? 'done' : 'move',
   displayName: initialPersisted.name,
-  outfit: initialPersisted.outfit,
+  outfit: {
+    ...initialPersisted.outfit,
+    scooterPaint: resolveEffectiveScooterPaint(initialPersisted.outfit),
+  },
   heldItem: initialPersisted.heldItem,
   activeEmote: 'none',
   seatedBenchId: null,
+  localVehicleId: null,
+  localVehicleRole: 'none',
   warmthRemainingSec: 180,
 
   connected: false,
@@ -605,6 +673,9 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   farBeacons: [],
   availableChannels: [],
   occupiedBenches: {},
+  scooters: buildInitialStationScooters(),
+  lastHornEvent: null,
+  incomingRideInvite: null,
 
   localTransient: {
     x: -29.2,
@@ -634,6 +705,16 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     camY: 137.0,
     camZ: 33.2,
     cameraOccludesSelf: false,
+    scooterSpeedKmh: 0,
+    scooterGear: 1,
+    scooterSteerRad: 0,
+    scooterPitchRad: 0,
+    scooterBankRad: 0,
+    scooterAirborne: false,
+    scooterDrifting: false,
+    scooterBraking: false,
+    scooterLandingImpact: 0,
+    handbrakeHeld: false,
   },
   teleportTarget: null,
 
@@ -788,6 +869,26 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   },
   triggerEmote: (activeEmote) => set({ activeEmote }),
   setSeatedBench: (seatedBenchId) => set({ seatedBenchId }),
+  setLocalVehicleState: (localVehicleId, localVehicleRole) =>
+    set({
+      localVehicleId,
+      localVehicleRole,
+      ...(localVehicleId ? { seatedBenchId: null } : {}),
+    }),
+  setScootersMap: (scooters) => set({ scooters }),
+  upsertScooter: (scooter) =>
+    set((s) => ({
+      scooters: { ...s.scooters, [scooter.scooterId]: scooter },
+    })),
+  removeScooter: (scooterId) =>
+    set((s) => {
+      if (!s.scooters[scooterId]) return s;
+      const next = { ...s.scooters };
+      delete next[scooterId];
+      return { scooters: next };
+    }),
+  setLastHornEvent: (lastHornEvent) => set({ lastHornEvent }),
+  setIncomingRideInvite: (incomingRideInvite) => set({ incomingRideInvite }),
 
   grantWarmthBuff: (seconds = 480) => {
     set({ warmthRemainingSec: seconds });
@@ -856,11 +957,24 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     const lm = LANDMARKS[id];
     if (!lm) return;
     const net = getNetController();
-    if (get().seatedBenchId) {
+    const cur = get();
+    if (cur.seatedBenchId) {
       net.requestBenchSeat(null);
     }
-    get().teleportTo(lm.position, lm.lookAt);
+    if (cur.localVehicleRole === 'passenger' && cur.localVehicleId) {
+      net.interactScooter?.(cur.localVehicleId, 'dismount');
+      set({ localVehicleId: null, localVehicleRole: 'none' });
+    }
+    const isDriving = get().localVehicleRole === 'driver' && Boolean(get().localVehicleId);
+    const roadSpot = isDriving ? LANDMARK_SCOOTER_PARKING[id] : null;
+    const destPos: [number, number, number] = roadSpot
+      ? [roadSpot.x, roadSpot.y, roadSpot.z]
+      : lm.position;
+    get().teleportTo(destPos, lm.lookAt);
     const lt = get().localTransient;
+    if (roadSpot) {
+      lt.yaw = roadSpot.yaw;
+    }
     net.sendTeleport?.(lt.x, lt.z, lt.yaw);
     get().markLandmarkDiscovered(id);
     set((s) => ({

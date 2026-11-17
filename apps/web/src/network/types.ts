@@ -6,6 +6,7 @@ import type {
   PlayerOutfit,
   PolaroidEntry,
   PolaroidPinAck,
+  ScooterPaintId,
   SocialInteractKind,
 } from '@dalat/protocol';
 
@@ -15,6 +16,15 @@ export interface SwitchChannelResult {
   channelName?: string;
   error?: string;
 }
+
+export type ScooterInteractAction =
+  | 'mount_any'
+  | 'mount_driver'
+  | 'mount_passenger'
+  | 'dismount'
+  | 'toggle_light'
+  | 'toggle_pose'
+  | 'stow';
 
 export interface IMultiplayerController {
   connect(preferredRoomCode?: string): Promise<void>;
@@ -34,6 +44,10 @@ export interface IMultiplayerController {
   sendEmote(emote: EmoteId): void;
   sendSocialInteract(targetSessionId: string, kind: SocialInteractKind): void;
   requestBenchSeat(benchId: string | null): void;
+  summonScooter(paintId?: ScooterPaintId, autoMount?: boolean): void;
+  interactScooter(scooterId: string, action: ScooterInteractAction): void;
+  acceptScooterInvite(scooterId: string): void;
+  sendScooterHorn(): void;
   sendJamNote(chordIndex: number, instrument: AcousticJamNote['instrument']): void;
   pinPolaroid(entry: Omit<PolaroidEntry, 'id' | 'likes' | 'createdAt'>): Promise<PolaroidPinAck>;
   likePolaroid(polaroidId: string): void;
@@ -41,4 +55,3 @@ export interface IMultiplayerController {
   /** Called inside useFrame(dt) to smoothly interpolate remote peer transforms at 60 FPS */
   interpolatePeers(nowMs: number): void;
 }
-

@@ -471,6 +471,10 @@ export class AmbientHikerController {
       running: false,
       grounded: true,
       warmBuff: true,
+      isDriving: false,
+      isPassenger: false,
+      isBraking: false,
+      headlightOn: false,
     };
   }
 }

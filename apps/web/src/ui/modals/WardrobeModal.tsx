@@ -15,6 +15,8 @@ import {
   resolveEffectiveEyewear,
   resolveEffectiveGender,
   resolveEffectiveNeckwear,
+  resolveEffectiveScooterPaint,
+  SCOOTER_PAINT_CATALOG,
 } from '@dalat/protocol';
 import type { IMultiplayerController } from '../../network/types';
 import { playTemporaryEmote } from '../../gameplay/interactions';
@@ -802,6 +804,65 @@ export function WardrobeModal({ net: propNet }: { net?: IMultiplayerController }
             isTouch={vp.isTouchCapable}
             onSelect={(hairColor) => applyPatch({ hairColor })}
           />
+
+          {/* Vintage Honda Super Cub 50 ("49-AA") Lacquer Paint Picker */}
+          <div style={{ marginTop: '4px' }}>
+            <div
+              style={{
+                fontSize: '12px',
+                fontWeight: 600,
+                color: UI_COLORS.mistText,
+                marginBottom: '6px',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+            >
+              <span>🛵 Màu sơn xe Super Cub 50 (Phím X gọi xe)</span>
+            </div>
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+              {SCOOTER_PAINT_CATALOG.map((paint) => {
+                const effPaint = resolveEffectiveScooterPaint(outfit);
+                const selected = effPaint === paint.id;
+                return (
+                  <button
+                    key={paint.id}
+                    type="button"
+                    title={`${paint.title} — ${paint.desc}`}
+                    onClick={() => applyPatch({ scooterPaint: paint.id })}
+                    className="dalat-glass-btn"
+                    style={{
+                      minHeight: vp.isTouchCapable ? '38px' : '34px',
+                      padding: '4px 10px 4px 7px',
+                      borderRadius: '999px',
+                      background: selected
+                        ? 'rgba(243, 195, 130, 0.22)'
+                        : 'rgba(255, 255, 255, 0.05)',
+                      border: `1.5px solid ${selected ? UI_COLORS.warmAmber : UI_COLORS.border}`,
+                      color: selected ? UI_COLORS.warmAmber : UI_COLORS.cream,
+                      fontSize: '12px',
+                      fontWeight: selected ? 600 : 500,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                    }}
+                  >
+                    <span
+                      style={{
+                        width: '14px',
+                        height: '14px',
+                        borderRadius: '50%',
+                        background: paint.hex,
+                        border: `1.5px solid ${paint.trimHex}`,
+                        flexShrink: 0,
+                      }}
+                    />
+                    <span>{paint.shortLabel}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
 
         {/* Sticky Primary Save Footer */}

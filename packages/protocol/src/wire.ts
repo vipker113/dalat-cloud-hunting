@@ -48,6 +48,10 @@ export interface ClientMoveInput {
   running: boolean;
   grounded: boolean;
   warmBuff: boolean;
+  isDriving?: boolean;
+  isPassenger?: boolean;
+  isBraking?: boolean;
+  headlightOn?: boolean;
 }
 
 export interface NearPeerTransform {
@@ -62,6 +66,10 @@ export interface NearPeerTransform {
   running: boolean;
   grounded: boolean;
   warmBuff: boolean;
+  isDriving: boolean;
+  isPassenger: boolean;
+  isBraking: boolean;
+  headlightOn: boolean;
 }
 
 export interface FarPeerBeacon {
@@ -111,7 +119,11 @@ export function encodeClientMove(input: ClientMoveInput): Uint8Array {
     (input.moving ? 1 : 0) |
     (input.running ? 2 : 0) |
     (input.grounded ? 4 : 0) |
-    (input.warmBuff ? 8 : 0);
+    (input.warmBuff ? 8 : 0) |
+    (input.isDriving ? 16 : 0) |
+    (input.isPassenger ? 32 : 0) |
+    (input.isBraking ? 64 : 0) |
+    (input.headlightOn ? 128 : 0);
   dv.setUint8(10, flags);
   return new Uint8Array(buf);
 }
@@ -138,6 +150,10 @@ export function decodeClientMove(bytes: Uint8Array | ArrayBuffer): Omit<ClientMo
     running: (flags & 2) !== 0,
     grounded: (flags & 4) !== 0,
     warmBuff: (flags & 8) !== 0,
+    isDriving: (flags & 16) !== 0,
+    isPassenger: (flags & 32) !== 0,
+    isBraking: (flags & 64) !== 0,
+    headlightOn: (flags & 128) !== 0,
   };
 }
 
@@ -164,14 +180,20 @@ export function encodeWorldSnapshot(
     dv.setInt16(offset + 4, clampI16(p.y * POS_SCALE), true);
     dv.setInt16(offset + 6, clampI16(p.z * POS_SCALE), true);
     dv.setUint8(offset + 8, quantizeYaw(p.yaw));
+    const isVeh = Boolean(p.isDriving || p.isPassenger);
+    const velScale = isVeh ? 5 : 10; // 0.2 m/s (±91.4 km/h) on scooter vs 0.1 m/s on foot — still 12 bytes!
     const flags =
       (p.moving ? 1 : 0) |
       (p.running ? 2 : 0) |
       (p.grounded ? 4 : 0) |
-      (p.warmBuff ? 8 : 0);
+      (p.warmBuff ? 8 : 0) |
+      (p.isDriving ? 16 : 0) |
+      (p.isPassenger ? 32 : 0) |
+      (p.isBraking ? 64 : 0) |
+      (p.headlightOn ? 128 : 0);
     dv.setUint8(offset + 9, flags);
-    dv.setInt8(offset + 10, clampI8(p.vx * 10));
-    dv.setInt8(offset + 11, clampI8(p.vz * 10));
+    dv.setInt8(offset + 10, clampI8(p.vx * velScale));
+    dv.setInt8(offset + 11, clampI8(p.vz * velScale));
     offset += 12;
   }
 
@@ -208,8 +230,11 @@ export function decodeWorldSnapshot(bytes: Uint8Array | ArrayBuffer): DecodedWor
     const z = dv.getInt16(offset + 6, true) / POS_SCALE;
     const yaw = dequantizeYaw(dv.getUint8(offset + 8));
     const flags = dv.getUint8(offset + 9);
-    const vx = dv.getInt8(offset + 10) / 10;
-    const vz = dv.getInt8(offset + 11) / 10;
+    const isDriving = (flags & 16) !== 0;
+    const isPassenger = (flags & 32) !== 0;
+    const velScale = isDriving || isPassenger ? 5 : 10;
+    const vx = dv.getInt8(offset + 10) / velScale;
+    const vz = dv.getInt8(offset + 11) / velScale;
     nearPeers.push({
       numericId,
       x,
@@ -222,6 +247,10 @@ export function decodeWorldSnapshot(bytes: Uint8Array | ArrayBuffer): DecodedWor
       running: (flags & 2) !== 0,
       grounded: (flags & 4) !== 0,
       warmBuff: (flags & 8) !== 0,
+      isDriving,
+      isPassenger,
+      isBraking: (flags & 64) !== 0,
+      headlightOn: (flags & 128) !== 0,
     });
     offset += 12;
   }

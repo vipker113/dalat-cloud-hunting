@@ -9,6 +9,7 @@ import { InteractableBeacons3D } from './InteractableBeacons3D';
 import { PeerCrowdRenderer } from './PeerCrowdRenderer';
 import { PhotoCaptureBridge } from './PhotoCaptureBridge';
 import { PlayerController } from './PlayerController';
+import { SuperCub50FleetRenderer } from './SuperCub50Vehicle';
 import { NetControllerContext, setNetController } from './netBridge';
 
 export interface GameplayRootProps {
@@ -195,6 +196,7 @@ export function GameplayRoot({ net }: GameplayRootProps) {
   return (
     <NetControllerContext.Provider value={net ?? null}>
       <PlayerController net={net} />
+      <SuperCub50FleetRenderer />
       <LocalPlayerRig />
       <PeerCrowdRenderer />
       <InteractableBeacons3D net={net} />

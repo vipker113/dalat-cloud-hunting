@@ -27,6 +27,10 @@ import {
   sampleWalkableHeight,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
+import {
+  playKickstandClack,
+  playScooterHorn,
+} from '../audio/highlandAudio';
 import type { IMultiplayerController } from '../network/types';
 import {
   executeInteractPrompt,
@@ -118,6 +122,14 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
   const heldItem = useGameStore((s) => s.heldItem);
   const activeEmote = useGameStore((s) => s.activeEmote);
   const seatedBenchId = useGameStore((s) => s.seatedBenchId);
+  const localVehicleId = useGameStore((s) => s.localVehicleId);
+  const localVehicleRole = useGameStore((s) => s.localVehicleRole);
+  const incomingRideInvite = useGameStore((s) => s.incomingRideInvite);
+  const canInvitePassenger = useGameStore((s) => {
+    if (s.localVehicleRole !== 'driver' || !s.localVehicleId) return false;
+    const sc = s.scooters[s.localVehicleId];
+    return Boolean(sc && !sc.passengerSessionId);
+  });
   const activeModal = useGameStore((s) => s.activeModal);
   const nearbyPrompt = useGameStore((s) => s.nearbyPrompt);
   const reducedMotion = useGameStore((s) => s.reducedMotion);
@@ -1213,6 +1225,87 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
           </div>
         )}
 
+        {/* INCOMING SUPER CUB RIDE INVITE BANNER */}
+        {incomingRideInvite && localVehicleRole === 'none' && activeModal === 'none' && (
+          <div
+            data-testid="scooter-invite-banner"
+            data-ui-overlay="true"
+            onTouchStart={(e) => e.stopPropagation()}
+            style={{
+              ...GLASS_PILL_STYLE,
+              borderRadius: '999px',
+              padding: '6px 8px 6px 14px',
+              border: `1.5px solid ${UI_COLORS.warmAmber}`,
+              background: 'rgba(32, 24, 16, 0.92)',
+              display: 'inline-flex',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              justifyContent: 'center',
+              gap: '8px',
+              maxWidth: 'calc(100vw - 16px)',
+              boxSizing: 'border-box',
+              pointerEvents: 'auto',
+              animation: 'dalatFadeUp 180ms ease',
+            }}
+          >
+            <span style={{ fontSize: '12.5px', color: '#FFF3DC', fontWeight: 500 }}>
+              🛵 <b>{incomingRideInvite.fromName}</b> mời bạn ngồi sau xe Super Cub!
+            </span>
+            <button
+              type="button"
+              data-testid="scooter-accept-invite-btn"
+              onClick={() => {
+                playKickstandClack();
+                net.acceptScooterInvite(incomingRideInvite.scooterId);
+              }}
+              className="dalat-glass-btn"
+              style={{
+                minHeight: '34px',
+                padding: '4px 12px',
+                borderRadius: '999px',
+                background: 'rgba(243, 195, 130, 0.28)',
+                border: `1px solid ${UI_COLORS.warmAmber}`,
+                color: UI_COLORS.warmAmber,
+                fontSize: '12px',
+                fontWeight: 700,
+              }}
+            >
+              Lên xe {showKeycaps ? '[E]' : ''}
+            </button>
+            <button
+              type="button"
+              aria-label="Đóng lời mời"
+              onClick={() => useGameStore.getState().setIncomingRideInvite(null)}
+              className="dalat-glass-btn"
+              style={{
+                width: '32px',
+                height: '32px',
+                padding: 0,
+                borderRadius: '50%',
+                background: 'rgba(255,255,255,0.06)',
+                border: `1px solid ${UI_COLORS.border}`,
+                color: UI_COLORS.mistText,
+                display: 'inline-flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+              }}
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
+
+        {/* LIVE SUPER CUB 50 SPEEDOMETER, GEAR & TANDEM STATUS PILL */}
+        {localVehicleRole !== 'none' && localVehicleId && activeModal === 'none' && (
+          <ScooterSpeedometerPill
+            scooterId={localVehicleId}
+            role={localVehicleRole}
+            showKeycaps={showKeycaps}
+            compact={isCompactMobile}
+            net={net}
+          />
+        )}
+
         {/* SOCIAL COMPANION ENCOUNTER: 1-Line Greeting Chip by Default, Expandable on Demand! */}
         {peerVisible && nearbyPeer && !peerMenuExpanded && (
           <div
@@ -1489,6 +1582,30 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
                   <span>{btn.label}</span>
                 </button>
               ))}
+
+              {canInvitePassenger && !nearbyPeer.isBot && (
+                <button
+                  type="button"
+                  data-testid="peer-invite-ride-btn"
+                  onClick={() => {
+                    recordUXEvent('social_interact');
+                    executePeerSocialAction('invite_ride', nearbyPeer, net);
+                  }}
+                  className="dalat-glass-btn"
+                  style={{
+                    minHeight: '38px',
+                    padding: '5px 12px',
+                    borderRadius: '999px',
+                    background: 'rgba(243, 195, 130, 0.28)',
+                    border: `1px solid ${UI_COLORS.warmAmber}`,
+                    color: UI_COLORS.warmAmber,
+                    fontSize: '12px',
+                    fontWeight: 700,
+                  }}
+                >
+                  🛵 Mời ngồi sau xe
+                </button>
+              )}
 
               <button
                 type="button"
@@ -2048,6 +2165,26 @@ export function DiegeticHUD({ net: propNet }: { net?: IMultiplayerController }) 
               }}
             />
 
+            {!isMobileLayout && (
+              <DockIconButton
+                testId="dock-btn-scooter"
+                icon={<span style={{ fontSize: '15px', lineHeight: 1 }}>🛵</span>}
+                label={localVehicleRole !== 'none' ? 'Cất/Xuống' : 'Xe Cub'}
+                shortcut={showKeycaps ? 'X' : undefined}
+                compact={false}
+                iconOnly={false}
+                active={localVehicleRole !== 'none'}
+                onClick={() => {
+                  playKickstandClack();
+                  if (localVehicleRole === 'passenger' && localVehicleId) {
+                    net.interactScooter(localVehicleId, 'dismount');
+                  } else {
+                    net.summonScooter();
+                  }
+                }}
+              />
+            )}
+
             <DockIconButton
               testId="dock-btn-map"
               icon={<MapIcon size={16} strokeWidth={1.85} />}
@@ -2183,5 +2320,258 @@ function DockIconButton(props: {
         </span>
       )}
     </button>
+  );
+}
+
+function ScooterSpeedometerPill(props: {
+  scooterId: string;
+  role: 'driver' | 'passenger';
+  showKeycaps: boolean;
+  compact: boolean;
+  net: IMultiplayerController;
+}) {
+  const { scooterId, role, showKeycaps, compact, net } = props;
+  const scooter = useGameStore((s) => s.scooters[scooterId]);
+  const companionName = useGameStore((s) => {
+    const sc = s.scooters[scooterId];
+    if (!sc) return '';
+    if (role === 'driver' && sc.passengerSessionId) {
+      return s.peers[sc.passengerSessionId]?.displayName || 'Bạn đồng hành';
+    }
+    if (role === 'passenger' && sc.driverSessionId) {
+      return s.peers[sc.driverSessionId]?.displayName || 'Tài xế';
+    }
+    return '';
+  });
+
+  const [telemetry, setTelemetry] = useState(() => {
+    const lt = useGameStore.getState().localTransient;
+    return {
+      kmh: Math.round(lt.scooterSpeedKmh),
+      gear: lt.scooterGear,
+      airborne: lt.scooterAirborne,
+      drifting: lt.scooterDrifting,
+    };
+  });
+
+  useEffect(() => {
+    const id = window.setInterval(() => {
+      const lt = useGameStore.getState().localTransient;
+      const kmh = Math.round(lt.scooterSpeedKmh);
+      const gear = lt.scooterGear;
+      const airborne = lt.scooterAirborne;
+      const drifting = lt.scooterDrifting;
+      setTelemetry((prev) =>
+        prev.kmh === kmh &&
+        prev.gear === gear &&
+        prev.airborne === airborne &&
+        prev.drifting === drifting
+          ? prev
+          : { kmh, gear, airborne, drifting }
+      );
+    }, 90);
+    return () => window.clearInterval(id);
+  }, []);
+
+  const plate = scooter?.plateLabel || '49-AA';
+  const headlightOn = scooter?.headlightOn !== false;
+  const poseLabel = scooter?.passengerPose === 'free_hands' ? 'Thả tay' : 'Ôm eo';
+
+  return (
+    <div
+      data-testid="scooter-speedometer-pill"
+      data-ui-overlay="true"
+      onTouchStart={(e) => e.stopPropagation()}
+      style={{
+        ...GLASS_PILL_STYLE,
+        borderRadius: '18px',
+        padding: compact ? '6px 9px' : '7px 14px',
+        border: `1px solid ${
+          telemetry.airborne ? UI_COLORS.warmAmber : 'rgba(243, 195, 130, 0.38)'
+        }`,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        gap: '5px',
+        maxWidth: 'calc(100vw - 16px)',
+        boxSizing: 'border-box',
+        pointerEvents: 'auto',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          flexWrap: 'wrap',
+          justifyContent: 'center',
+          gap: compact ? '6px' : '9px',
+          fontSize: '12px',
+        }}
+      >
+        <span
+          style={{
+            fontFamily: UI_FONTS.mono,
+            fontSize: '11.5px',
+            padding: '1px 6px',
+            borderRadius: '6px',
+            background: 'rgba(246, 241, 227, 0.92)',
+            color: '#182028',
+            fontWeight: 800,
+          }}
+        >
+          {plate}
+        </span>
+
+        <span
+          data-testid="scooter-kmh-readout"
+          style={{
+            fontFamily: UI_FONTS.mono,
+            fontSize: compact ? '14px' : '15.5px',
+            fontWeight: 800,
+            color: telemetry.kmh >= 54 ? '#FFD485' : UI_COLORS.cream,
+          }}
+        >
+          {telemetry.kmh} km/h
+        </span>
+
+        <span
+          style={{
+            fontFamily: UI_FONTS.mono,
+            fontSize: '11.5px',
+            color: UI_COLORS.warmAmber,
+            fontWeight: 700,
+          }}
+        >
+          Số {telemetry.gear}
+        </span>
+
+        {telemetry.airborne && (
+          <span
+            style={{
+              padding: '1px 7px',
+              borderRadius: '999px',
+              background: 'rgba(243, 195, 130, 0.28)',
+              border: `1px solid ${UI_COLORS.warmAmber}`,
+              color: '#FFE9BD',
+              fontSize: '11px',
+              fontWeight: 700,
+            }}
+          >
+            🪽 BAY!
+          </span>
+        )}
+
+        {telemetry.drifting && !telemetry.airborne && (
+          <span
+            style={{
+              padding: '1px 7px',
+              borderRadius: '999px',
+              background: 'rgba(226, 132, 88, 0.26)',
+              color: '#FFCBA8',
+              fontSize: '11px',
+              fontWeight: 700,
+            }}
+          >
+            💨 DRIFT
+          </span>
+        )}
+
+        {companionName && (
+          <span style={{ color: '#FFE6C2', fontSize: '12px', fontWeight: 500 }}>
+            • {role === 'driver' ? `Chở ${companionName}` : `Sau xe ${companionName}`}
+          </span>
+        )}
+
+        {!compact && (
+          <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+            {role === 'driver' ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    playScooterHorn(1.0);
+                    net.sendScooterHorn();
+                  }}
+                  className="dalat-glass-btn"
+                  style={{
+                    minHeight: '28px',
+                    padding: '2px 8px',
+                    borderRadius: '999px',
+                    background: 'rgba(255,255,255,0.07)',
+                    border: `1px solid ${UI_COLORS.border}`,
+                    color: UI_COLORS.cream,
+                    fontSize: '11.5px',
+                  }}
+                >
+                  📯 Còi {showKeycaps ? '[H]' : ''}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => net.interactScooter(scooterId, 'toggle_light')}
+                  className="dalat-glass-btn"
+                  style={{
+                    minHeight: '28px',
+                    padding: '2px 8px',
+                    borderRadius: '999px',
+                    background: headlightOn
+                      ? 'rgba(243, 195, 130, 0.2)'
+                      : 'rgba(255,255,255,0.06)',
+                    border: `1px solid ${
+                      headlightOn ? 'rgba(243, 195, 130, 0.45)' : UI_COLORS.border
+                    }`,
+                    color: headlightOn ? UI_COLORS.warmAmber : UI_COLORS.mistText,
+                    fontSize: '11.5px',
+                  }}
+                >
+                  💡 Đèn {showKeycaps ? '[L]' : ''}
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => net.interactScooter(scooterId, 'toggle_pose')}
+                className="dalat-glass-btn"
+                style={{
+                  minHeight: '28px',
+                  padding: '2px 9px',
+                  borderRadius: '999px',
+                  background: 'rgba(243, 195, 130, 0.18)',
+                  border: '1px solid rgba(243, 195, 130, 0.42)',
+                  color: UI_COLORS.warmAmber,
+                  fontSize: '11.5px',
+                }}
+              >
+                🤍 {poseLabel} {showKeycaps ? '[V]' : ''}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => {
+                playKickstandClack();
+                net.interactScooter(scooterId, 'dismount');
+              }}
+              className="dalat-glass-btn"
+              style={{
+                minHeight: '28px',
+                padding: '2px 8px',
+                borderRadius: '999px',
+                background: 'rgba(255,255,255,0.07)',
+                border: `1px solid ${UI_COLORS.border}`,
+                color: UI_COLORS.cream,
+                fontSize: '11.5px',
+              }}
+            >
+              Xuống {showKeycaps ? '[F]' : ''}
+            </button>
+          </div>
+        )}
+      </div>
+
+      {showKeycaps && role === 'driver' && (
+        <div style={{ fontSize: '11px', color: UI_COLORS.mutedText }}>
+          Shift: Vít ga 60km/h • Space: Phanh sau Drift • Bản đồ [M]: Chở bạn đi cùng
+        </div>
+      )}
+    </div>
   );
 }

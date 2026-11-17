@@ -350,11 +350,8 @@ function createObstacleWallAndPropColliders(): THREE.BufferGeometry[] {
     obs.push(makeOpenWallPrism(0.32, 2.7, 0.32, wx, gacCheY + 0.2, wz, 0.65));
   }
 
-  // 4. Campfire Stone Pit, Vintage Super Cub 50, Lonely Pine Hero Trunk & 5 Wind Turbine Towers
+  // 4. Campfire Stone Pit, Lonely Pine Hero Trunk & 5 Wind Turbine Towers (Super Cub 50 is now a live drivable fleet!)
   obs.push(makeOpenCylinderCollider(1.16, 1.45, -53.0, 134.95, 24.0, 10));
-  obs.push(
-    makeOpenWallPrism(1.92, 1.45, 0.78, 19.8, sampleGroundHeight(19.8, 125.2) - 0.15, 125.2, -0.68)
-  );
   obs.push(
     makeOpenCylinderCollider(0.84, 6.8, -95.0, sampleGroundHeight(-95, -155) - 0.5, -155.0, 10)
   );
@@ -420,7 +417,7 @@ function createObstacleWallAndPropColliders(): THREE.BufferGeometry[] {
       const yaw = contourYaw + (seededHash(gx * 7 + gz * 23) - 0.5) * 0.26;
       const sc = 0.88 + seededHash(gx * 41 + gz * 3) * 0.36;
       const scZ = sc * (0.85 + seededHash(gx + gz) * 0.35);
-      obs.push(makeOpenWallPrism(5.6 * sc, 2.8 * sc, 11.4 * scZ, jx, gy - 1.4, jz, yaw));
+      obs.push(makeOpenWallPrism(5.6 * sc, 4.8 * sc, 11.4 * scZ, jx, gy - 1.6, jz, yaw));
       ghCount++;
     }
   }
@@ -439,7 +436,7 @@ function createObstacleWallAndPropColliders(): THREE.BufferGeometry[] {
       const yaw = contourYaw + (seededHash(gx * 7 + gz * 23) - 0.5) * 0.24;
       const sc = 0.86 + seededHash(gx * 41 + gz * 3) * 0.36;
       const scZ = sc * (0.85 + seededHash(gx + gz) * 0.35);
-      obs.push(makeOpenWallPrism(5.6 * sc, 2.8 * sc, 11.4 * scZ, jx, gy - 1.4, jz, yaw));
+      obs.push(makeOpenWallPrism(5.6 * sc, 4.8 * sc, 11.4 * scZ, jx, gy - 1.6, jz, yaw));
       ghCount++;
     }
   }

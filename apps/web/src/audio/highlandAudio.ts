@@ -22,6 +22,10 @@ export interface WebAudioEngine {
   windBandpass: BiquadFilterNode;
   drizzleGain: GainNode;
   fireBedGain: GainNode;
+  cubEngineOsc: OscillatorNode;
+  cubSubOsc: OscillatorNode;
+  cubFilter: BiquadFilterNode;
+  cubGain: GainNode;
   activeTransientSources: Set<AudioScheduledSourceNode>;
 }
 
@@ -340,4 +344,141 @@ export function playStrideFootstep(
   texGain.connect(dest);
   trackTransientSource(engine, texSrc);
   texSrc.start(now, Math.random() * Math.max(0.2, pinkBuffer.duration - 0.25), texDur + 0.02);
+}
+
+/**
+ * Cheerful vintage Honda Super Cub 50 double-beep electric horn ("Bíp-bíp!").
+ */
+export function playScooterHorn(attenuation = 1): void {
+  const engine = registeredAudioEngine;
+  if (!engine) return;
+  const st = useGameStore.getState();
+  if (!st.audioEnabled || st.quietMode || st.masterVolume <= 0.001) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+
+  const { ctx, masterGain } = engine;
+  if (ctx.state === 'suspended') {
+    void ctx.resume().catch(() => {});
+  }
+  if (ctx.state !== 'running') return;
+
+  const att = Math.max(0.05, Math.min(1, attenuation));
+  const now = ctx.currentTime + 0.008;
+
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.setValueAtTime(1080, now);
+  bp.Q.setValueAtTime(1.8, now);
+  bp.connect(masterGain);
+
+  for (let b = 0; b < 2; b++) {
+    const t0 = now + b * 0.125;
+    const dur = b === 0 ? 0.082 : 0.105;
+
+    const oscA = ctx.createOscillator();
+    const oscB = ctx.createOscillator();
+    const env = ctx.createGain();
+
+    oscA.type = 'sawtooth';
+    oscA.frequency.setValueAtTime(488, t0);
+    oscB.type = 'triangle';
+    oscB.frequency.setValueAtTime(612, t0);
+
+    env.gain.setValueAtTime(0.0001, t0);
+    env.gain.linearRampToValueAtTime(0.095 * att, t0 + 0.008);
+    env.gain.setValueAtTime(0.088 * att, t0 + dur - 0.015);
+    env.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+
+    oscA.connect(env);
+    oscB.connect(env);
+    env.connect(bp);
+
+    trackTransientSource(engine, oscA);
+    trackTransientSource(engine, oscB);
+    oscA.start(t0);
+    oscB.start(t0);
+    oscA.stop(t0 + dur + 0.015);
+    oscB.stop(t0 + dur + 0.015);
+  }
+}
+
+/**
+ * Tactile metallic kickstand spring clack on scooter mount / dismount.
+ */
+export function playKickstandClack(): void {
+  const engine = registeredAudioEngine;
+  if (!engine) return;
+  const st = useGameStore.getState();
+  if (!st.audioEnabled || st.masterVolume <= 0.001) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+
+  const { ctx, masterGain } = engine;
+  if (ctx.state !== 'running') return;
+
+  const now = ctx.currentTime + 0.005;
+  const osc = ctx.createOscillator();
+  const env = ctx.createGain();
+  osc.type = 'triangle';
+  osc.frequency.setValueAtTime(840, now);
+  osc.frequency.exponentialRampToValueAtTime(220, now + 0.048);
+
+  env.gain.setValueAtTime(0.0001, now);
+  env.gain.linearRampToValueAtTime(0.075, now + 0.004);
+  env.gain.exponentialRampToValueAtTime(0.0001, now + 0.055);
+
+  osc.connect(env);
+  env.connect(masterGain);
+  trackTransientSource(engine, osc);
+  osc.start(now);
+  osc.stop(now + 0.065);
+}
+
+/**
+ * Dual-shock suspension compression thump + gravel crunch when landing a Super Cub jump.
+ */
+export function playScooterLandingThump(impact: number): void {
+  const engine = registeredAudioEngine;
+  if (!engine || impact <= 0.08) return;
+  const st = useGameStore.getState();
+  if (!st.audioEnabled || st.masterVolume <= 0.001) return;
+  if (typeof document !== 'undefined' && document.hidden) return;
+
+  const { ctx, pinkBuffer, masterGain } = engine;
+  if (ctx.state !== 'running') return;
+
+  const amp = Math.min(1, Math.max(0.15, impact));
+  const now = ctx.currentTime + 0.004;
+
+  const thud = ctx.createOscillator();
+  const thudEnv = ctx.createGain();
+  thud.type = 'sine';
+  thud.frequency.setValueAtTime(118 + amp * 28, now);
+  thud.frequency.exponentialRampToValueAtTime(36, now + 0.14);
+
+  thudEnv.gain.setValueAtTime(0.0001, now);
+  thudEnv.gain.linearRampToValueAtTime(0.16 * amp, now + 0.007);
+  thudEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.16);
+
+  thud.connect(thudEnv);
+  thudEnv.connect(masterGain);
+  trackTransientSource(engine, thud);
+  thud.start(now);
+  thud.stop(now + 0.17);
+
+  const crunch = ctx.createBufferSource();
+  crunch.buffer = pinkBuffer;
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.setValueAtTime(1240, now);
+  bp.Q.setValueAtTime(1.4, now);
+  const cEnv = ctx.createGain();
+  cEnv.gain.setValueAtTime(0.0001, now);
+  cEnv.gain.linearRampToValueAtTime(0.065 * amp, now + 0.01);
+  cEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.13);
+
+  crunch.connect(bp);
+  bp.connect(cEnv);
+  cEnv.connect(masterGain);
+  trackTransientSource(engine, crunch);
+  crunch.start(now, Math.random() * Math.max(0.2, pinkBuffer.duration - 0.25), 0.14);
 }

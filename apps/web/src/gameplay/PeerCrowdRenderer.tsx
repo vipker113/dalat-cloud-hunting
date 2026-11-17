@@ -11,6 +11,7 @@ import {
 import { RemotePeerState, useGameStore } from '../store/gameStore';
 import { worldColliderRegistry } from '../world/colliderRegistry';
 import { AvatarMotionSample, HighlandAvatar } from './HighlandAvatar';
+import { readLiveScooterPoses } from './SuperCub50Vehicle';
 
 interface PeerAppearanceSlot {
   sessionId: string;
@@ -45,8 +46,10 @@ function isPeerInActiveNearAoi(
   localX: number,
   localZ: number,
   nowPerf: number,
-  farBeaconNumericIds: Set<number>
+  farBeaconNumericIds: Set<number>,
+  localVehicleId: string | null
 ): boolean {
+  if (localVehicleId && peer.vehicleId === localVehicleId) return true;
   if (farBeaconNumericIds.has(peer.numericId)) return false;
   if (peer.inNearAoi === false) return false;
   if (peer.lastNearSnapMs !== undefined && nowPerf - peer.lastNearSnapMs > 1500) {
@@ -283,7 +286,8 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
         st.localTransient.x,
         st.localTransient.z,
         nowPerf,
-        farBeaconNumericIdsScratch
+        farBeaconNumericIdsScratch,
+        st.localVehicleId
       )
     ) {
       liveVisibleNearNumericIds.delete(slot.numericId);
@@ -293,9 +297,11 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     }
 
     const isDressing = !st.hasEnteredWorld || st.activeModal === 'wardrobe';
+    const isCoRiderWithLocal =
+      Boolean(st.localVehicleId) && peer.vehicleId === st.localVehicleId;
     const overlapsDressingStage =
       isDressing && Math.hypot(peer.x - st.localTransient.x, peer.z - st.localTransient.z) < 2.8;
-    const hideForPhoto = st.photoModeActive && st.photoHideCrowd;
+    const hideForPhoto = st.photoModeActive && st.photoHideCrowd && !isCoRiderWithLocal;
     grp.visible = !hideForPhoto;
     if (hideForPhoto) {
       liveVisibleNearNumericIds.delete(slot.numericId);
@@ -310,79 +316,122 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     }
     liveVisibleNearNumericIds.add(slot.numericId);
 
-    let targetX = peer.x;
-    let targetY = peer.y;
-    let targetZ = peer.z;
-    let targetYaw = peer.yaw;
+    const scooterPose =
+      peer.vehicleRole !== 'none' && peer.vehicleId
+        ? readLiveScooterPoses().get(peer.vehicleId)
+        : undefined;
 
-    if (peer.seatId) {
-      const seatTransform = resolveBenchSeatTransform(peer.seatId);
-      if (seatTransform) {
-        targetX = seatTransform.position[0];
-        targetY = seatTransform.position[1];
-        targetZ = seatTransform.position[2];
-        targetYaw = seatTransform.yaw;
+    // Prevent co-rider's hat/hair from blocking first-person 35mm viewfinder when shooting from the rear pillion seat!
+    if (
+      isCoRiderWithLocal &&
+      st.photoModeActive &&
+      st.photoCountdown === 0 &&
+      scooterPose
+    ) {
+      const anchor =
+        peer.vehicleRole === 'driver'
+          ? scooterPose.driverAnchorPos
+          : scooterPose.pillionAnchorPos;
+      const dCam = Math.hypot(anchor.x - camera.position.x, anchor.z - camera.position.z);
+      if (dCam < 0.95) {
+        grp.visible = false;
+        if (el) el.style.display = 'none';
+        return;
       }
-    } else if (peer.grounded) {
-      // Cache BVH floor height so stationary or distant bots don't trigger 96 BVH raycasts per frame!
-      const rc = rayCacheRef.current;
-      const moveDeltaSq = (targetX - rc.x) * (targetX - rc.x) + (targetZ - rc.z) * (targetZ - rc.z);
-      if (moveDeltaSq > 0.0064) {
-        rc.x = targetX;
-        rc.z = targetZ;
-        let floorY = Math.max(peer.y, sampleWalkableHeight(targetX, targetZ));
-        const lt = st.localTransient;
-        const distToLocalSq = (targetX - lt.x) * (targetX - lt.x) + (targetZ - lt.z) * (targetZ - lt.z);
-        const collider = distToLocalSq <= 42 * 42 ? worldColliderRegistry.getCollider() : null;
-        if (collider) {
-          const { mesh, bvh } = collider;
-          _peerInvMat.copy(mesh.matrixWorld).invert();
-          _peerNormMat.getNormalMatrix(mesh.matrixWorld);
-          _peerRay.direction.copy(_peerDown).transformDirection(_peerInvMat).normalize();
-          _peerRay.origin.set(targetX, floorY + 1.45, targetZ).applyMatrix4(_peerInvMat);
-          const hit = bvh.raycastFirst(_peerRay, THREE.DoubleSide, 0, 3.4);
-          if (hit) {
-            _peerHitPt.copy(hit.point).applyMatrix4(mesh.matrixWorld);
-            if (hit.face) {
-              _peerHitNorm.copy(hit.face.normal).applyMatrix3(_peerNormMat).normalize();
-            } else {
-              _peerHitNorm.set(0, 1, 0);
-            }
-            if (_peerHitNorm.y >= 0.45 && _peerHitPt.y <= peer.y + 1.15 && _peerHitPt.y > floorY) {
-              floorY = _peerHitPt.y;
-            }
-          }
-        }
-        rc.floorY = floorY;
-      }
-      targetY = rc.floorY + 0.01;
     }
 
-    if (!initializedRef.current) {
-      grp.position.set(targetX, targetY, targetZ);
-      grp.rotation.y = targetYaw;
+    if (scooterPose) {
+      const anchor =
+        peer.vehicleRole === 'driver'
+          ? scooterPose.driverAnchorPos
+          : scooterPose.pillionAnchorPos;
+      grp.position.copy(anchor);
+      grp.quaternion.copy(scooterPose.chassisQuat);
       initializedRef.current = true;
     } else {
-      const blend = 1 - Math.exp(-16 * dt);
-      grp.position.x += (targetX - grp.position.x) * blend;
-      grp.position.y += (targetY - grp.position.y) * blend;
-      grp.position.z += (targetZ - grp.position.z) * blend;
-      grp.rotation.y += shortestAngleDelta(grp.rotation.y, targetYaw) * blend;
+      let targetX = peer.x;
+      let targetY = peer.y;
+      let targetZ = peer.z;
+      let targetYaw = peer.yaw;
+
+      if (peer.seatId) {
+        const seatTransform = resolveBenchSeatTransform(peer.seatId);
+        if (seatTransform) {
+          targetX = seatTransform.position[0];
+          targetY = seatTransform.position[1];
+          targetZ = seatTransform.position[2];
+          targetYaw = seatTransform.yaw;
+        }
+      } else if (peer.grounded) {
+        // Cache BVH floor height so stationary or distant bots don't trigger 96 BVH raycasts per frame!
+        const rc = rayCacheRef.current;
+        const moveDeltaSq =
+          (targetX - rc.x) * (targetX - rc.x) + (targetZ - rc.z) * (targetZ - rc.z);
+        if (moveDeltaSq > 0.0064) {
+          rc.x = targetX;
+          rc.z = targetZ;
+          let floorY = Math.max(peer.y, sampleWalkableHeight(targetX, targetZ));
+          const lt = st.localTransient;
+          const distToLocalSq =
+            (targetX - lt.x) * (targetX - lt.x) + (targetZ - lt.z) * (targetZ - lt.z);
+          const collider = distToLocalSq <= 42 * 42 ? worldColliderRegistry.getCollider() : null;
+          if (collider) {
+            const { mesh, bvh } = collider;
+            _peerInvMat.copy(mesh.matrixWorld).invert();
+            _peerNormMat.getNormalMatrix(mesh.matrixWorld);
+            _peerRay.direction.copy(_peerDown).transformDirection(_peerInvMat).normalize();
+            _peerRay.origin.set(targetX, floorY + 1.45, targetZ).applyMatrix4(_peerInvMat);
+            const hit = bvh.raycastFirst(_peerRay, THREE.DoubleSide, 0, 3.4);
+            if (hit) {
+              _peerHitPt.copy(hit.point).applyMatrix4(mesh.matrixWorld);
+              if (hit.face) {
+                _peerHitNorm.copy(hit.face.normal).applyMatrix3(_peerNormMat).normalize();
+              } else {
+                _peerHitNorm.set(0, 1, 0);
+              }
+              if (
+                _peerHitNorm.y >= 0.45 &&
+                _peerHitPt.y <= peer.y + 1.15 &&
+                _peerHitPt.y > floorY
+              ) {
+                floorY = _peerHitPt.y;
+              }
+            }
+          }
+          rc.floorY = floorY;
+        }
+        targetY = rc.floorY + 0.01;
+      }
+
+      if (!initializedRef.current) {
+        grp.position.set(targetX, targetY, targetZ);
+        grp.rotation.set(0, targetYaw, 0);
+        initializedRef.current = true;
+      } else {
+        const blend = 1 - Math.exp(-16 * dt);
+        grp.position.x += (targetX - grp.position.x) * blend;
+        grp.position.y += (targetY - grp.position.y) * blend;
+        grp.position.z += (targetZ - grp.position.z) * blend;
+        const nextYaw = grp.rotation.y + shortestAngleDelta(grp.rotation.y, targetYaw) * blend;
+        grp.rotation.set(0, nextYaw, 0);
+      }
     }
 
     const jamAge = st.lastJamNote ? (Date.now() - st.lastJamNote.timestamp) / 1000 : 99;
     const isPeerJam = Boolean(st.lastJamNote && st.lastJamNote.senderId === slot.sessionId);
 
-    const prevYaw = prevYawRef.current ?? grp.rotation.y;
-    const yawDelta = shortestAngleDelta(prevYaw, grp.rotation.y);
-    prevYawRef.current = grp.rotation.y;
+    const curHeadingYaw = scooterPose ? scooterPose.yaw : grp.rotation.y;
+    const prevYaw = prevYawRef.current ?? curHeadingYaw;
+    const yawDelta = shortestAngleDelta(prevYaw, curHeadingYaw);
+    prevYawRef.current = curHeadingYaw;
     const yawRate = THREE.MathUtils.clamp((yawDelta / Math.max(0.001, dt)) * 0.15, -1, 1);
 
     const m = motionRef.current;
     m.moving = peer.moving;
     m.running = peer.running;
-    m.grounded = peer.grounded;
-    m.speed = Math.hypot(peer.vx, peer.vz) || (peer.moving ? (peer.running ? 6.6 : 2.45) : 0);
+    m.grounded = scooterPose ? scooterPose.grounded : peer.grounded;
+    m.speed =
+      Math.hypot(peer.vx, peer.vz) || (peer.moving ? (peer.running ? 6.6 : 2.45) : 0);
     m.seated = Boolean(peer.seatId);
     m.emote = peer.emote;
     m.warmBuff = peer.warmBuff;
@@ -390,6 +439,10 @@ function PeerAvatarSlot({ slot }: { slot: PeerAppearanceSlot }) {
     m.windStrength = st.atmosphere.windStrength;
     m.jamPulse = isPeerJam && jamAge < 1.4 ? 1 - jamAge / 1.4 : 0;
     m.turnBank = -yawRate;
+    m.vehicleRole = scooterPose ? peer.vehicleRole : 'none';
+    m.passengerPose = scooterPose ? scooterPose.passengerPose : 'hold_waist';
+    m.steerAngle = scooterPose ? scooterPose.steerAngle : 0;
+    m.landingImpact = scooterPose ? scooterPose.landingImpact : 0;
 
     if (el) {
       if (
@@ -695,9 +748,14 @@ export function PeerCrowdRenderer() {
       }
       const nowPerf = performance.now();
 
-      // Prioritize selected/nearby peers first, then sort by distance squared
+      // Prioritize co-riders on the same scooter & selected/nearby peers first, then sort by distance squared
       const preferredId = st.selectedPeerSessionId || st.nearbyPeer?.sessionId || '';
+      const localVid = st.localVehicleId;
       allPeers.sort((a, b) => {
+        const aCo = Boolean(localVid && a.vehicleId === localVid);
+        const bCo = Boolean(localVid && b.vehicleId === localVid);
+        if (aCo && !bCo) return -1;
+        if (bCo && !aCo) return 1;
         if (a.sessionId === preferredId && b.sessionId !== preferredId) return -1;
         if (b.sessionId === preferredId && a.sessionId !== preferredId) return 1;
         const da = (a.x - lt.x) * (a.x - lt.x) + (a.z - lt.z) * (a.z - lt.z);
@@ -706,7 +764,7 @@ export function PeerCrowdRenderer() {
       });
 
       const selected: PeerAppearanceSlot[] = allPeers
-        .filter((p) => isPeerInActiveNearAoi(p, lt.x, lt.z, nowPerf, farSet))
+        .filter((p) => isPeerInActiveNearAoi(p, lt.x, lt.z, nowPerf, farSet, localVid))
         .slice(0, maxNearPeers)
         .map((p) => ({
           sessionId: p.sessionId,

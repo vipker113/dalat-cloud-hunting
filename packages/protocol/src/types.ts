@@ -30,7 +30,24 @@ export type EmoteId =
   | 'cheers_cup'
   | 'cheer_sunrise';
 
-export type SocialInteractKind = 'greet' | 'cheers' | 'cheer' | 'gift_flower' | 'sparkler';
+export type SocialInteractKind =
+  | 'greet'
+  | 'cheers'
+  | 'cheer'
+  | 'gift_flower'
+  | 'sparkler'
+  | 'invite_ride';
+
+export type ScooterPaintId =
+  | 'moss_green'
+  | 'mist_cream'
+  | 'plum_red'
+  | 'peace_blue'
+  | 'da_quy_gold';
+
+export type VehicleRole = 'none' | 'driver' | 'passenger';
+
+export type PassengerPoseStyle = 'hold_waist' | 'free_hands';
 
 export type AvatarGender = 'female' | 'male';
 
@@ -88,6 +105,7 @@ export interface PlayerOutfit {
   neckwear?: NeckwearId;
   eyewear?: EyewearId;
   bagStyle?: BagStyleId;
+  scooterPaint?: ScooterPaintId;
   hairColor: string;
   backpack: boolean;
 }
@@ -169,6 +187,70 @@ export const HELD_PROP_CATALOG: ReadonlyArray<CatalogItemMeta<HeldItemId>> = [
   { id: 'guitar', title: 'Đàn Guitar thông', shortLabel: 'Guitar thông', desc: 'Hòa âm bên lửa' },
   { id: 'none', title: 'Thả tay tự do', shortLabel: 'Thả tay', desc: 'Rảnh tay dạo bước' },
 ];
+
+export interface ScooterPaintMeta extends CatalogItemMeta<ScooterPaintId> {
+  hex: string;
+  trimHex: string;
+}
+
+export const SCOOTER_PAINT_CATALOG: ReadonlyArray<ScooterPaintMeta> = [
+  {
+    id: 'moss_green',
+    title: 'Xanh Rêu Cổ Điển',
+    shortLabel: 'Xanh rêu',
+    desc: 'Sơn zin 1968 chuẩn Đà Lạt',
+    hex: '#4A7561',
+    trimHex: '#F3EBDD',
+  },
+  {
+    id: 'mist_cream',
+    title: 'Kem Sữa Mơ Sương',
+    shortLabel: 'Kem sữa',
+    desc: 'Nhã nhặn sương mai Cầu Đất',
+    hex: '#DDD1BA',
+    trimHex: '#F9F4EA',
+  },
+  {
+    id: 'plum_red',
+    title: 'Đỏ Mận Đà Lạt',
+    shortLabel: 'Đỏ mận',
+    desc: 'Nổi bật giữa rừng thông xanh',
+    hex: '#8C3136',
+    trimHex: '#F2E9D8',
+  },
+  {
+    id: 'peace_blue',
+    title: 'Xanh Hòa Bình',
+    shortLabel: 'Xanh cổ',
+    desc: 'Hoài niệm dốc phố Hòa Bình',
+    hex: '#466A9E',
+    trimHex: '#F2ECDF',
+  },
+  {
+    id: 'da_quy_gold',
+    title: 'Vàng Hoa Dã Quỳ',
+    shortLabel: 'Vàng nghệ',
+    desc: 'Rực rỡ nắng thu cao nguyên',
+    hex: '#C98B27',
+    trimHex: '#F6EFE2',
+  },
+];
+
+export function resolveEffectiveScooterPaint(
+  outfit?: { scooterPaint?: string | null } | null
+): ScooterPaintId {
+  const raw = outfit?.scooterPaint;
+  if (
+    raw === 'moss_green' ||
+    raw === 'mist_cream' ||
+    raw === 'plum_red' ||
+    raw === 'peace_blue' ||
+    raw === 'da_quy_gold'
+  ) {
+    return raw;
+  }
+  return 'moss_green';
+}
 
 export function getCoatGender(coatStyle: CoatStyleId): AvatarGender {
   switch (coatStyle) {
@@ -297,6 +379,59 @@ export interface ServerPoseCorrection {
   reason?: string;
 }
 
+export interface ScooterStateSnapshot {
+  scooterId: string;
+  kind: 'station' | 'personal';
+  ownerSessionId: string;
+  paintId: ScooterPaintId;
+  plateLabel: string;
+  driverSessionId: string;
+  passengerSessionId: string;
+  passengerPose: PassengerPoseStyle;
+  headlightOn: boolean;
+  parkedX: number;
+  parkedY: number;
+  parkedZ: number;
+  parkedYaw: number;
+}
+
+export interface VehicleAckPayload {
+  ok: boolean;
+  scooterId: string | null;
+  role: VehicleRole;
+  x?: number;
+  y?: number;
+  z?: number;
+  yaw?: number;
+  reason?: string;
+}
+
+export interface VehicleHornEvent {
+  scooterId: string;
+  senderId: string;
+  senderName: string;
+  x: number;
+  y: number;
+  z: number;
+  timestamp: number;
+}
+
+export interface VehicleRideInvite {
+  fromId: string;
+  fromName: string;
+  scooterId: string;
+  timestamp: number;
+}
+
+export interface VehicleDuoTeleportEvent {
+  scooterId: string;
+  landmarkName: string;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+}
+
 export const ROOM_CODE_REGEX = /^[A-Z0-9-]{3,14}$/;
 
 /**
@@ -332,6 +467,11 @@ export const WORLD_CONSTANTS = {
   PROXIMITY_CHAT_RADIUS: 35,
   MAX_WALK_SPEED: 2.5,
   MAX_RUN_SPEED: 7.4,
+  MAX_SCOOTER_CRUISE_SPEED: 11.67, // 42 km/h normal throttle
+  MAX_SCOOTER_BOOST_SPEED: 16.67, // 60 km/h full throttle (Shift)
+  MAX_SCOOTER_DOWNHILL_SPEED: 19.17, // 69 km/h steep downhill gravity surge
+  SCOOTER_WHEELBASE: 1.2,
+  SCOOTER_PILLION_BACK_OFFSET: 0.48,
 } as const;
 
 export const DEFAULT_OUTFIT: PlayerOutfit = {
@@ -343,6 +483,7 @@ export const DEFAULT_OUTFIT: PlayerOutfit = {
   neckwear: 'knit_scarf',
   eyewear: 'none',
   bagStyle: 'trek_pack',
+  scooterPaint: 'moss_green',
   hairColor: '#2B211B',
   backpack: true,
 };

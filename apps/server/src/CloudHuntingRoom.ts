@@ -5,6 +5,7 @@ import {
   BAG_CATALOG,
   type BagStyleId,
   type ChatBubbleMessage,
+  checkPedestrianDeckZone,
   COAT_CATALOG,
   type CoatStyleId,
   decodeClientMove,
@@ -21,12 +22,14 @@ import {
   HELD_PROP_CATALOG,
   type HeldItemId,
   LANDMARK_LIST,
+  LANDMARK_SCOOTER_PARKING,
   LANDMARKS,
   type NearPeerTransform,
   NECKWEAR_CATALOG,
   type NeckwearId,
   normalizeRoomCode,
   parseBenchSeatId,
+  type PassengerPoseStyle,
   type PlayerOutfit,
   type PolaroidEntry,
   type PolaroidPinAck,
@@ -35,15 +38,24 @@ import {
   resolveEffectiveEyewear,
   resolveEffectiveGender,
   resolveEffectiveNeckwear,
+  resolveEffectiveScooterPaint,
   sampleGroundHeight,
   sampleWalkableHeight,
+  SCOOTER_PAINT_CATALOG,
+  type ScooterPaintId,
   type ServerPoseCorrection,
   SHARED_BENCHES,
+  type SocialInteractKind,
+  STATION_SCOOTERS,
+  type VehicleAckPayload,
+  type VehicleDuoTeleportEvent,
+  type VehicleHornEvent,
+  type VehicleRideInvite,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
 import { AmbientHikerController, type AmbientHikerRuntime } from './ambientHikers';
 import { MAX_IMAGE_DATA_LEN, sanitizeSocialText, worldPersistence } from './persistence';
-import { CloudRoomState, PlayerSchema, type CloudRoomMetadata } from './schema';
+import { CloudRoomState, PlayerSchema, ScooterSchema, type CloudRoomMetadata } from './schema';
 
 const POETIC_CHANNEL_NAMES = [
   'Sương Sớm Cầu Đất',
@@ -64,6 +76,7 @@ const VALID_HEADWEAR = new Set<HeadwearId>([
 const VALID_NECKWEAR = new Set<NeckwearId>(NECKWEAR_CATALOG.map((n) => n.id));
 const VALID_EYEWEAR = new Set<EyewearId>(EYEWEAR_CATALOG.map((e) => e.id));
 const VALID_BAG_STYLES = new Set<BagStyleId>(BAG_CATALOG.map((b) => b.id));
+const VALID_SCOOTER_PAINTS = new Set<ScooterPaintId>(SCOOTER_PAINT_CATALOG.map((p) => p.id));
 const VALID_HELD_ITEMS = new Set<HeldItemId>(HELD_PROP_CATALOG.map((p) => p.id));
 const VALID_EMOTES = new Set<EmoteId>([
   'none',
@@ -101,6 +114,10 @@ interface HumanEntityTransform {
   running: boolean;
   grounded: boolean;
   warmBuff: boolean;
+  isDriving: boolean;
+  isPassenger: boolean;
+  isBraking: boolean;
+  headlightOn: boolean;
   hasReceivedMove: boolean;
   hydratedWorldInit: boolean;
   clampStreak: number;
@@ -111,9 +128,25 @@ interface HumanEntityTransform {
   lastChatAtMs: number;
   lastSocialAtMs: number;
   lastJamAtMs: number;
+  lastHornAtMs: number;
   lastPolaroidAtMs: number;
   lastChimeAtMs: number;
   likedPolaroids: Set<string>;
+}
+
+interface ScooterRuntimeState {
+  scooterId: string;
+  kind: 'station' | 'personal';
+  homeX: number;
+  homeY: number;
+  homeZ: number;
+  homeYaw: number;
+  liveX: number;
+  liveY: number;
+  liveZ: number;
+  liveYaw: number;
+  lastActiveAtMs: number;
+  lastSchemaSyncAtMs: number;
 }
 
 export const activeCloudRooms = new Map<string, CloudHuntingRoom>();
@@ -203,6 +236,10 @@ function sanitizeOutfit(raw: Partial<PlayerOutfit> | undefined | null): PlayerOu
       ? raw.gender
       : getCoatGender(rawCoatStyle);
   const coatStyle: CoatStyleId = ensureCoatMatchesGender(rawCoatStyle, gender);
+  const scooterPaint: ScooterPaintId =
+    typeof raw.scooterPaint === 'string' && VALID_SCOOTER_PAINTS.has(raw.scooterPaint as ScooterPaintId)
+      ? (raw.scooterPaint as ScooterPaintId)
+      : resolveEffectiveScooterPaint(DEFAULT_OUTFIT);
 
   return {
     gender,
@@ -213,6 +250,7 @@ function sanitizeOutfit(raw: Partial<PlayerOutfit> | undefined | null): PlayerOu
     neckwear,
     eyewear,
     bagStyle,
+    scooterPaint,
     hairColor: sanitizeHexColor(raw.hairColor, DEFAULT_OUTFIT.hairColor),
     backpack: bagStyle !== 'none',
   };
@@ -243,6 +281,7 @@ export class CloudHuntingRoom extends Room<{
   public channelName = 'Sương Sớm Cầu Đất #1';
 
   private readonly humanEntities = new Map<string, HumanEntityTransform>();
+  private readonly scooterRuntimes = new Map<string, ScooterRuntimeState>();
   private readonly pendingReconnections = new Map<
     string,
     ReturnType<CloudHuntingRoom['allowReconnection']>
@@ -302,6 +341,7 @@ export class CloudHuntingRoom extends Room<{
 
     for (const sid of toEvict) {
       this.releaseClientBench(sid);
+      this.releaseClientVehicle(sid, true);
       this.humanEntities.delete(sid);
       this.state.players.delete(sid);
 
@@ -423,6 +463,41 @@ export class CloudHuntingRoom extends Room<{
     state.channelName = this.channelName;
     this.state = state;
 
+    // Seed the 5 shared vintage Honda Super Cub 50 station scooters across Da Lat landmarks
+    const bootMs = Date.now();
+    for (let i = 0; i < STATION_SCOOTERS.length; i++) {
+      const spec = STATION_SCOOTERS[i];
+      const sc = new ScooterSchema();
+      sc.scooterId = spec.scooterId;
+      sc.kind = 'station';
+      sc.ownerSessionId = '';
+      sc.paintId = spec.paintId;
+      sc.plateLabel = spec.plateLabel;
+      sc.driverSessionId = '';
+      sc.passengerSessionId = '';
+      sc.passengerPose = 'hold_waist';
+      sc.headlightOn = true;
+      sc.parkedX = spec.x;
+      sc.parkedY = spec.y;
+      sc.parkedZ = spec.z;
+      sc.parkedYaw = spec.yaw;
+      state.scooters.set(spec.scooterId, sc);
+      this.scooterRuntimes.set(spec.scooterId, {
+        scooterId: spec.scooterId,
+        kind: 'station',
+        homeX: spec.x,
+        homeY: spec.y,
+        homeZ: spec.z,
+        homeYaw: spec.yaw,
+        liveX: spec.x,
+        liveY: spec.y,
+        liveZ: spec.z,
+        liveYaw: spec.yaw,
+        lastActiveAtMs: bootMs,
+        lastSchemaSyncAtMs: bootMs,
+      });
+    }
+
     this.ambientHikers = new AmbientHikerController(() => this.nextBotNumericId++);
 
     await this.setMatchmaking({
@@ -485,12 +560,17 @@ export class CloudHuntingRoom extends Room<{
         // Always release any occupied bench immediately when fast-traveling
         this.releaseClientBench(client.sessionId);
 
+        // If a passenger independently fast-travels via Map, detach them cleanly from the pillion seat first
+        if (ps.vehicleRole === 'passenger') {
+          this.releaseClientVehicle(client.sessionId, false);
+        }
+
         const rawX = typeof payload?.x === 'number' ? payload.x : NaN;
         const rawZ = typeof payload?.z === 'number' ? payload.z : NaN;
         if (!Number.isFinite(rawX) || !Number.isFinite(rawZ)) return;
 
-        const nx = clamp(rawX, -445, 445);
-        const nz = clamp(rawZ, -445, 445);
+        let nx = clamp(rawX, -445, 445);
+        let nz = clamp(rawZ, -445, 445);
         const wallNow = Date.now();
         const allowQaOverride =
           payload?.qaOverride === true && process.env.NODE_ENV !== 'production';
@@ -500,6 +580,28 @@ export class CloudHuntingRoom extends Room<{
           this.isNearAnyPlayer(nx, nz, client.sessionId);
 
         if (validTarget && (allowQaOverride || wallNow - ent.lastTeleportAtMs >= 300)) {
+          let matchedLandmarkName = '';
+          let targetYaw =
+            typeof payload?.yaw === 'number' && Number.isFinite(payload.yaw) ? payload.yaw : ent.yaw;
+
+          // When a scooter driver fast-travels to a landmark, snap to that landmark's roadside parking turnout
+          // and bring both the Super Cub AND any attached passenger along together!
+          if (ps.vehicleRole === 'driver' && ps.vehicleId && !allowQaOverride) {
+            for (let i = 0; i < LANDMARK_LIST.length; i++) {
+              const lm = LANDMARK_LIST[i];
+              if (Math.hypot(nx - lm.position[0], nz - lm.position[2]) <= 18.5) {
+                const spot = LANDMARK_SCOOTER_PARKING[lm.id];
+                if (spot) {
+                  nx = spot.x;
+                  nz = spot.z;
+                  targetYaw = spot.yaw;
+                  matchedLandmarkName = lm.name;
+                }
+                break;
+              }
+            }
+          }
+
           const walkY = sampleWalkableHeight(nx, nz);
           const groundY = sampleGroundHeight(nx, nz);
           const requestedY =
@@ -509,9 +611,7 @@ export class CloudHuntingRoom extends Room<{
           ent.x = nx;
           ent.y = requestedY;
           ent.z = nz;
-          if (typeof payload?.yaw === 'number' && Number.isFinite(payload.yaw)) {
-            ent.yaw = payload.yaw;
-          }
+          ent.yaw = targetYaw;
           ent.vx = 0;
           ent.vz = 0;
           ent.moving = false;
@@ -519,13 +619,66 @@ export class CloudHuntingRoom extends Room<{
           if (!allowQaOverride) {
             ent.lastTeleportAtMs = wallNow;
           }
-          ent.burstSlackMeters = 6.5;
-          ent.clampStreak = 0;
+          ent.burstSlackMeters = ps.vehicleRole === 'driver' ? 24.0 : 8.5;
+          ent.clampStreak = 0; // Reset token-bucket streak on valid fast-travel
 
           ps.spawnX = ent.x;
           ps.spawnY = ent.y;
           ps.spawnZ = ent.z;
           ps.spawnYaw = ent.yaw;
+
+          if (ps.vehicleRole === 'driver' && ps.vehicleId) {
+            const sc = this.state.scooters.get(ps.vehicleId);
+            const rt = this.scooterRuntimes.get(ps.vehicleId);
+            if (sc && rt) {
+              sc.parkedX = nx;
+              sc.parkedY = requestedY;
+              sc.parkedZ = nz;
+              sc.parkedYaw = targetYaw;
+              rt.liveX = nx;
+              rt.liveY = requestedY;
+              rt.liveZ = nz;
+              rt.liveYaw = targetYaw;
+              rt.lastActiveAtMs = wallNow;
+              rt.lastSchemaSyncAtMs = wallNow;
+
+              if (sc.passengerSessionId) {
+                const pEnt = this.humanEntities.get(sc.passengerSessionId);
+                const pPs = this.state.players.get(sc.passengerSessionId);
+                const backOff = WORLD_CONSTANTS.SCOOTER_PILLION_BACK_OFFSET;
+                const px = nx - Math.sin(targetYaw) * backOff;
+                const pz = nz - Math.cos(targetYaw) * backOff;
+                if (pEnt) {
+                  pEnt.x = px;
+                  pEnt.y = requestedY;
+                  pEnt.z = pz;
+                  pEnt.yaw = targetYaw;
+                  pEnt.vx = 0;
+                  pEnt.vz = 0;
+                  pEnt.lastTeleportAtMs = wallNow;
+                  pEnt.burstSlackMeters = 8.5;
+                }
+                if (pPs) {
+                  pPs.spawnX = px;
+                  pPs.spawnY = requestedY;
+                  pPs.spawnZ = pz;
+                  pPs.spawnYaw = targetYaw;
+                }
+                const pClient = this.clients.find((c) => c.sessionId === sc.passengerSessionId);
+                if (pClient) {
+                  const duoEvt: VehicleDuoTeleportEvent = {
+                    scooterId: sc.scooterId,
+                    landmarkName: matchedLandmarkName || 'điểm dừng mới',
+                    x: nx,
+                    y: requestedY,
+                    z: nz,
+                    yaw: targetYaw,
+                  };
+                  pClient.send('vehicle_duo_teleport', duoEvt);
+                }
+              }
+            }
+          }
         } else {
           const correction: ServerPoseCorrection = {
             x: ent.x,
@@ -561,8 +714,13 @@ export class CloudHuntingRoom extends Room<{
           ps.neckwear = resolveEffectiveNeckwear(outfit);
           ps.eyewear = resolveEffectiveEyewear(outfit);
           ps.bagStyle = resolveEffectiveBagStyle(outfit);
+          ps.scooterPaint = resolveEffectiveScooterPaint(outfit);
           ps.hairColor = outfit.hairColor;
           ps.backpack = outfit.backpack;
+          const ownScooter = this.state.scooters.get(`cub-own-${client.sessionId}`);
+          if (ownScooter) {
+            ownScooter.paintId = ps.scooterPaint;
+          }
         }
       }
     );
@@ -631,7 +789,7 @@ export class CloudHuntingRoom extends Room<{
         client,
         payload: {
           targetSessionId?: string;
-          kind?: 'greet' | 'cheers' | 'cheer' | 'gift_flower' | 'sparkler';
+          kind?: SocialInteractKind;
         }
       ) => {
         const ent = this.humanEntities.get(client.sessionId);
@@ -639,7 +797,7 @@ export class CloudHuntingRoom extends Room<{
         if (!ent || !ps) return;
 
         const now = Date.now();
-        if (now - ent.lastSocialAtMs < 750) return;
+        if (now - ent.lastSocialAtMs < 650) return;
 
         const targetId =
           typeof payload?.targetSessionId === 'string' ? payload.targetSessionId.trim() : '';
@@ -650,11 +808,31 @@ export class CloudHuntingRoom extends Room<{
             kind !== 'cheers' &&
             kind !== 'cheer' &&
             kind !== 'gift_flower' &&
-            kind !== 'sparkler')
+            kind !== 'sparkler' &&
+            kind !== 'invite_ride')
         ) {
           return;
         }
         ent.lastSocialAtMs = now;
+
+        // Special 1-click Scooter Ride Invitation when driver invites a nearby friend onto the rear seat!
+        if (kind === 'invite_ride') {
+          if (ps.vehicleRole !== 'driver' || !ps.vehicleId) return;
+          const sc = this.state.scooters.get(ps.vehicleId);
+          const targetHuman = this.humanEntities.get(targetId);
+          const targetClient = this.clients.find((c) => c.sessionId === targetId);
+          if (!sc || !targetHuman || !targetClient) return;
+          if (sc.passengerSessionId && sc.passengerSessionId !== targetId) return;
+          if (Math.hypot(targetHuman.x - ent.x, targetHuman.z - ent.z) > 18.5) return;
+          const invitePayload: VehicleRideInvite = {
+            fromId: client.sessionId,
+            fromName: ps.displayName,
+            scooterId: sc.scooterId,
+            timestamp: now,
+          };
+          targetClient.send('vehicle_invite', invitePayload);
+          return;
+        }
 
         // Handle ambient highland hiker social reactions (greeting, clinking warm cups, cheering sunrise)
         if (targetId.startsWith('bot-') && this.ambientHikers) {
@@ -829,6 +1007,295 @@ export class CloudHuntingRoom extends Room<{
       });
     });
 
+    // 7b. Authoritative Vintage Super Cub 50 Summon, Tandem Mount/Dismount, Headlight, Pose & Horn
+    this.onMessage(
+      'vehicle_summon',
+      (client, payload: { paintId?: ScooterPaintId; autoMount?: boolean }) => {
+        const ent = this.humanEntities.get(client.sessionId);
+        const ps = this.state.players.get(client.sessionId);
+        if (!ent || !ps || ps.isBot) return;
+
+        const personalId = `cub-own-${client.sessionId}`;
+        // Pressing X while already driving your own personal scooter stows it cleanly!
+        if (ps.vehicleId === personalId && ps.vehicleRole === 'driver') {
+          this.stowPersonalScooter(client.sessionId);
+          return;
+        }
+
+        this.releaseClientBench(client.sessionId);
+        if (ps.vehicleId) {
+          this.releaseClientVehicle(client.sessionId, false);
+        }
+
+        const paintId: ScooterPaintId =
+          typeof payload?.paintId === 'string' && VALID_SCOOTER_PAINTS.has(payload.paintId)
+            ? payload.paintId
+            : VALID_SCOOTER_PAINTS.has(ps.scooterPaint as ScooterPaintId)
+              ? (ps.scooterPaint as ScooterPaintId)
+              : 'moss_green';
+        ps.scooterPaint = paintId;
+
+        // Place outside wooden pedestrian sanctuaries so bridges/verandas stay peaceful
+        const pedCheck = checkPedestrianDeckZone(ent.x, ent.z);
+        const spawnX = clamp(pedCheck.inside ? pedCheck.pushX : ent.x, -442, 442);
+        const spawnZ = clamp(pedCheck.inside ? pedCheck.pushZ : ent.z, -442, 442);
+        const spawnY = sampleGroundHeight(spawnX, spawnZ);
+        const spawnYaw = ent.yaw;
+        const now = Date.now();
+
+        let sc = this.state.scooters.get(personalId);
+        if (!sc) {
+          sc = new ScooterSchema();
+          sc.scooterId = personalId;
+          sc.kind = 'personal';
+          sc.ownerSessionId = client.sessionId;
+          sc.plateLabel = `49-B1 ${String(1000 + (ps.numericId % 8999))}`;
+          sc.passengerPose = 'hold_waist';
+          sc.headlightOn = true;
+          this.state.scooters.set(personalId, sc);
+        } else if (sc.passengerSessionId && sc.passengerSessionId !== client.sessionId) {
+          // Safely dismount any prior passenger before relocating personal scooter
+          this.dismountSingleRider(sc.passengerSessionId);
+        } else if (sc.driverSessionId && sc.driverSessionId !== client.sessionId) {
+          this.dismountSingleRider(sc.driverSessionId);
+        }
+
+        sc.paintId = paintId;
+        sc.parkedX = spawnX;
+        sc.parkedY = spawnY;
+        sc.parkedZ = spawnZ;
+        sc.parkedYaw = spawnYaw;
+
+        this.scooterRuntimes.set(personalId, {
+          scooterId: personalId,
+          kind: 'personal',
+          homeX: spawnX,
+          homeY: spawnY,
+          homeZ: spawnZ,
+          homeYaw: spawnYaw,
+          liveX: spawnX,
+          liveY: spawnY,
+          liveZ: spawnZ,
+          liveYaw: spawnYaw,
+          lastActiveAtMs: now,
+          lastSchemaSyncAtMs: now,
+        });
+
+        const shouldAutoMount =
+          payload?.autoMount !== false && Math.hypot(spawnX - ent.x, spawnZ - ent.z) <= 5.5;
+        if (shouldAutoMount) {
+          this.mountClientOntoScooter(client, sc, 'driver');
+        } else {
+          const ack: VehicleAckPayload = {
+            ok: true,
+            scooterId: null,
+            role: 'none',
+            x: spawnX,
+            y: spawnY,
+            z: spawnZ,
+            yaw: spawnYaw,
+            reason: pedCheck.inside
+              ? `🛵 Đã dựng xe Super Cub chờ bạn ngay bên ngoài ${pedCheck.zoneLabel}!`
+              : '🛵 Đã gọi xe Super Cub 50 bên cạnh bạn!',
+          };
+          client.send('vehicle_ack', ack);
+        }
+      }
+    );
+
+    this.onMessage(
+      'vehicle_interact',
+      (
+        client,
+        payload: {
+          scooterId?: string;
+          action?:
+            | 'mount_any'
+            | 'mount_driver'
+            | 'mount_passenger'
+            | 'dismount'
+            | 'toggle_light'
+            | 'toggle_pose'
+            | 'stow';
+        }
+      ) => {
+        const ent = this.humanEntities.get(client.sessionId);
+        const ps = this.state.players.get(client.sessionId);
+        if (!ent || !ps || ps.isBot) return;
+
+        const action = payload?.action || 'mount_any';
+
+        if (action === 'dismount') {
+          this.dismountSingleRider(client.sessionId);
+          return;
+        }
+
+        if (action === 'stow') {
+          this.stowPersonalScooter(client.sessionId);
+          return;
+        }
+
+        if (action === 'toggle_light') {
+          if (ps.vehicleRole === 'driver' && ps.vehicleId) {
+            const sc = this.state.scooters.get(ps.vehicleId);
+            if (sc) {
+              sc.headlightOn = !sc.headlightOn;
+              ent.headlightOn = sc.headlightOn;
+            }
+          }
+          return;
+        }
+
+        if (action === 'toggle_pose') {
+          if (ps.vehicleRole === 'passenger' && ps.vehicleId) {
+            const sc = this.state.scooters.get(ps.vehicleId);
+            if (sc) {
+              const nextPose: PassengerPoseStyle =
+                sc.passengerPose === 'hold_waist' ? 'free_hands' : 'hold_waist';
+              sc.passengerPose = nextPose;
+            }
+          }
+          return;
+        }
+
+        const targetScooterId =
+          typeof payload?.scooterId === 'string' ? payload.scooterId.trim() : '';
+        const sc = this.state.scooters.get(targetScooterId);
+        const rt = this.scooterRuntimes.get(targetScooterId);
+        if (!sc || !rt) {
+          client.send('vehicle_ack', {
+            ok: false,
+            scooterId: null,
+            role: 'none',
+            reason: 'Không tìm thấy chiếc xe Cub này.',
+          } satisfies VehicleAckPayload);
+          return;
+        }
+
+        // Verify proximity to live scooter position (generous 6.5m tolerance for moving friend pickup!)
+        let bikeX = rt.liveX;
+        let bikeZ = rt.liveZ;
+        if (sc.driverSessionId) {
+          const dEnt = this.humanEntities.get(sc.driverSessionId);
+          if (dEnt) {
+            bikeX = dEnt.x;
+            bikeZ = dEnt.z;
+          }
+        }
+        if (Math.hypot(ent.x - bikeX, ent.z - bikeZ) > 6.8) {
+          client.send('vehicle_ack', {
+            ok: false,
+            scooterId: null,
+            role: 'none',
+            reason: 'Xe đang ở hơi xa — lại gần thêm một chút để lên xe nhé!',
+          } satisfies VehicleAckPayload);
+          return;
+        }
+
+        const canDriveThisBike =
+          sc.kind === 'station' || sc.ownerSessionId === client.sessionId;
+        const driverFree = !sc.driverSessionId || sc.driverSessionId === client.sessionId;
+        const passengerFree =
+          !sc.passengerSessionId || sc.passengerSessionId === client.sessionId;
+
+        if (
+          (action === 'mount_driver' || action === 'mount_any') &&
+          driverFree &&
+          canDriveThisBike
+        ) {
+          this.mountClientOntoScooter(client, sc, 'driver');
+          return;
+        }
+
+        if ((action === 'mount_passenger' || action === 'mount_any') && passengerFree) {
+          this.mountClientOntoScooter(client, sc, 'passenger');
+          return;
+        }
+
+        if (!canDriveThisBike && driverFree && action === 'mount_driver') {
+          client.send('vehicle_ack', {
+            ok: false,
+            scooterId: null,
+            role: 'none',
+            reason: 'Đây là xe cá nhân của lữ khách khác — bạn có thể ngồi yên sau hoặc nhấn [X] gọi xe riêng nhé!',
+          } satisfies VehicleAckPayload);
+          return;
+        }
+
+        client.send('vehicle_ack', {
+          ok: false,
+          scooterId: null,
+          role: 'none',
+          reason: 'Chiếc Super Cub này đã đủ 2 người ngồi rồi!',
+        } satisfies VehicleAckPayload);
+      }
+    );
+
+    this.onMessage('vehicle_accept_invite', (client, payload: { scooterId?: string }) => {
+      const ent = this.humanEntities.get(client.sessionId);
+      const ps = this.state.players.get(client.sessionId);
+      if (!ent || !ps || ps.isBot) return;
+
+      const scooterId = typeof payload?.scooterId === 'string' ? payload.scooterId.trim() : '';
+      const sc = this.state.scooters.get(scooterId);
+      if (!sc || (sc.passengerSessionId && sc.passengerSessionId !== client.sessionId)) {
+        client.send('vehicle_ack', {
+          ok: false,
+          scooterId: null,
+          role: 'none',
+          reason: 'Yên sau xe vừa có người ngồi mất rồi!',
+        } satisfies VehicleAckPayload);
+        return;
+      }
+
+      const dEnt = sc.driverSessionId ? this.humanEntities.get(sc.driverSessionId) : null;
+      const bikeX = dEnt ? dEnt.x : sc.parkedX;
+      const bikeZ = dEnt ? dEnt.z : sc.parkedZ;
+      if (Math.hypot(ent.x - bikeX, ent.z - bikeZ) > 22.0) {
+        client.send('vehicle_ack', {
+          ok: false,
+          scooterId: null,
+          role: 'none',
+          reason: 'Tài xế đã chạy hơi xa — hãy lại gần hơn để lên xe nhé!',
+        } satisfies VehicleAckPayload);
+        return;
+      }
+
+      this.mountClientOntoScooter(client, sc, 'passenger');
+    });
+
+    this.onMessage('vehicle_horn', (client) => {
+      const ent = this.humanEntities.get(client.sessionId);
+      const ps = this.state.players.get(client.sessionId);
+      if (!ent || !ps || ps.vehicleRole !== 'driver' || !ps.vehicleId) return;
+
+      const now = Date.now();
+      if (now - ent.lastHornAtMs < 320) return;
+      ent.lastHornAtMs = now;
+
+      const hornEvt: VehicleHornEvent = {
+        scooterId: ps.vehicleId,
+        senderId: client.sessionId,
+        senderName: ps.displayName,
+        x: ent.x,
+        y: ent.y,
+        z: ent.z,
+        timestamp: now,
+      };
+
+      for (let i = 0; i < this.clients.length; i++) {
+        const c = this.clients[i];
+        if (c.sessionId === client.sessionId) {
+          c.send('vehicle_horn', hornEvt);
+          continue;
+        }
+        const other = this.humanEntities.get(c.sessionId);
+        if (other && Math.hypot(other.x - ent.x, other.z - ent.z) <= 42) {
+          c.send('vehicle_horn', hornEvt);
+        }
+      }
+    });
+
     // 8. Acoustic campfire jam around Tiệm Cà Phê Mơ Sương (45m radius)
     this.onMessage(
       'jam_note',
@@ -975,6 +1442,266 @@ export class CloudHuntingRoom extends Room<{
     }
   }
 
+  private mountClientOntoScooter(
+    client: Client,
+    sc: ScooterSchema,
+    role: 'driver' | 'passenger'
+  ): void {
+    const ent = this.humanEntities.get(client.sessionId);
+    const ps = this.state.players.get(client.sessionId);
+    if (!ent || !ps) return;
+
+    this.releaseClientBench(client.sessionId);
+    if (ps.vehicleId && (ps.vehicleId !== sc.scooterId || ps.vehicleRole !== role)) {
+      this.releaseClientVehicle(client.sessionId, false);
+    }
+
+    const rt = this.scooterRuntimes.get(sc.scooterId);
+    const dEnt = sc.driverSessionId ? this.humanEntities.get(sc.driverSessionId) : null;
+    const baseX = dEnt ? dEnt.x : rt ? rt.liveX : sc.parkedX;
+    const baseY = dEnt ? dEnt.y : rt ? rt.liveY : sc.parkedY;
+    const baseZ = dEnt ? dEnt.z : rt ? rt.liveZ : sc.parkedZ;
+    const baseYaw = dEnt ? dEnt.yaw : rt ? rt.liveYaw : sc.parkedYaw;
+    const now = Date.now();
+
+    if (role === 'driver') {
+      sc.driverSessionId = client.sessionId;
+      ps.vehicleId = sc.scooterId;
+      ps.vehicleRole = 'driver';
+      ps.emote = 'none';
+      ent.x = baseX;
+      ent.y = baseY;
+      ent.z = baseZ;
+      ent.yaw = baseYaw;
+      ent.vx = 0;
+      ent.vz = 0;
+      ent.isDriving = true;
+      ent.isPassenger = false;
+      ent.isBraking = false;
+      ent.headlightOn = sc.headlightOn;
+      ent.burstSlackMeters = 24.0;
+      ent.clampStreak = 0;
+      ent.lastTeleportAtMs = now;
+    } else {
+      sc.passengerSessionId = client.sessionId;
+      ps.vehicleId = sc.scooterId;
+      ps.vehicleRole = 'passenger';
+      ps.emote = 'none';
+      const backOff = WORLD_CONSTANTS.SCOOTER_PILLION_BACK_OFFSET;
+      ent.x = baseX - Math.sin(baseYaw) * backOff;
+      ent.y = baseY;
+      ent.z = baseZ - Math.cos(baseYaw) * backOff;
+      ent.yaw = baseYaw;
+      ent.vx = dEnt ? dEnt.vx : 0;
+      ent.vz = dEnt ? dEnt.vz : 0;
+      ent.isDriving = false;
+      ent.isPassenger = true;
+      ent.isBraking = false;
+      ent.headlightOn = sc.headlightOn;
+      ent.burstSlackMeters = 8.5;
+      ent.clampStreak = 0;
+      ent.lastTeleportAtMs = now;
+
+      if (sc.driverSessionId && sc.driverSessionId !== client.sessionId) {
+        const driverClient = this.clients.find((c) => c.sessionId === sc.driverSessionId);
+        if (driverClient) {
+          driverClient.send('vehicle_passenger_event', {
+            scooterId: sc.scooterId,
+            passengerId: client.sessionId,
+            passengerName: ps.displayName,
+            joined: true,
+          });
+        }
+      }
+    }
+
+    ps.spawnX = ent.x;
+    ps.spawnY = ent.y;
+    ps.spawnZ = ent.z;
+    ps.spawnYaw = ent.yaw;
+    if (rt) {
+      rt.lastActiveAtMs = now;
+    }
+
+    const ack: VehicleAckPayload = {
+      ok: true,
+      scooterId: sc.scooterId,
+      role,
+      x: baseX,
+      y: baseY,
+      z: baseZ,
+      yaw: baseYaw,
+    };
+    client.send('vehicle_ack', ack);
+  }
+
+  private dismountSingleRider(sessionId: string, reasonToast?: string): void {
+    const ent = this.humanEntities.get(sessionId);
+    const ps = this.state.players.get(sessionId);
+    const client = this.clients.find((c) => c.sessionId === sessionId);
+    if (!ps || !ps.vehicleId) {
+      if (ent) {
+        ent.isDriving = false;
+        ent.isPassenger = false;
+        ent.isBraking = false;
+      }
+      return;
+    }
+
+    const sc = this.state.scooters.get(ps.vehicleId);
+    const rt = this.scooterRuntimes.get(ps.vehicleId);
+    const wasDriver = ps.vehicleRole === 'driver';
+    const dEnt = sc?.driverSessionId ? this.humanEntities.get(sc.driverSessionId) : null;
+    const bikeX = dEnt ? dEnt.x : rt ? rt.liveX : ent ? ent.x : 0;
+    const bikeZ = dEnt ? dEnt.z : rt ? rt.liveZ : ent ? ent.z : 0;
+    const bikeYaw = dEnt ? dEnt.yaw : rt ? rt.liveYaw : ent ? ent.yaw : 0;
+    const now = Date.now();
+
+    if (sc) {
+      if (sc.driverSessionId === sessionId) {
+        sc.driverSessionId = '';
+        const groundY = sampleGroundHeight(bikeX, bikeZ);
+        sc.parkedX = bikeX;
+        sc.parkedY = groundY;
+        sc.parkedZ = bikeZ;
+        sc.parkedYaw = bikeYaw;
+        if (rt) {
+          rt.liveX = bikeX;
+          rt.liveY = groundY;
+          rt.liveZ = bikeZ;
+          rt.liveYaw = bikeYaw;
+          rt.lastActiveAtMs = now;
+          rt.lastSchemaSyncAtMs = now;
+        }
+      }
+      if (sc.passengerSessionId === sessionId) {
+        sc.passengerSessionId = '';
+        if (sc.driverSessionId && sc.driverSessionId !== sessionId) {
+          const driverClient = this.clients.find((c) => c.sessionId === sc.driverSessionId);
+          if (driverClient) {
+            driverClient.send('vehicle_passenger_event', {
+              scooterId: sc.scooterId,
+              passengerId: sessionId,
+              passengerName: ps.displayName,
+              joined: false,
+            });
+          }
+        }
+      }
+    }
+
+    // Step off cleanly to left (-0.92m) for driver, right (+0.92m) for passenger
+    const sideSign = wasDriver ? -1 : 1;
+    const rawExitX = clamp(bikeX + Math.cos(bikeYaw) * 0.92 * sideSign, -444, 444);
+    const rawExitZ = clamp(bikeZ - Math.sin(bikeYaw) * 0.92 * sideSign, -444, 444);
+    const exitY = sampleWalkableHeight(rawExitX, rawExitZ);
+
+    ps.vehicleId = '';
+    ps.vehicleRole = '';
+    if (ent) {
+      ent.x = rawExitX;
+      ent.y = exitY;
+      ent.z = rawExitZ;
+      ent.vx = 0;
+      ent.vz = 0;
+      ent.moving = false;
+      ent.running = false;
+      ent.grounded = true;
+      ent.isDriving = false;
+      ent.isPassenger = false;
+      ent.isBraking = false;
+      ent.burstSlackMeters = 6.5;
+      ent.clampStreak = 0;
+      ent.lastTeleportAtMs = now;
+      ps.spawnX = rawExitX;
+      ps.spawnY = exitY;
+      ps.spawnZ = rawExitZ;
+    }
+
+    if (client) {
+      const ack: VehicleAckPayload = {
+        ok: true,
+        scooterId: null,
+        role: 'none',
+        x: rawExitX,
+        y: exitY,
+        z: rawExitZ,
+        yaw: bikeYaw,
+        reason: reasonToast,
+      };
+      client.send('vehicle_ack', ack);
+    }
+  }
+
+  private stowPersonalScooter(ownerSessionId: string): void {
+    const personalId = `cub-own-${ownerSessionId}`;
+    const sc = this.state.scooters.get(personalId);
+    if (!sc) return;
+
+    if (sc.passengerSessionId) {
+      this.dismountSingleRider(
+        sc.passengerSessionId,
+        '🛵 Chủ xe đã cất chiếc Super Cub — bạn đã xuống xe an toàn!'
+      );
+    }
+    if (sc.driverSessionId) {
+      this.dismountSingleRider(sc.driverSessionId, '🛵 Đã cất xe Super Cub 50 gọn gàng.');
+    } else {
+      const ownerClient = this.clients.find((c) => c.sessionId === ownerSessionId);
+      if (ownerClient) {
+        ownerClient.send('vehicle_ack', {
+          ok: true,
+          scooterId: null,
+          role: 'none',
+          reason: '🛵 Đã cất xe Super Cub 50 gọn gàng.',
+        } satisfies VehicleAckPayload);
+      }
+    }
+
+    this.state.scooters.delete(personalId);
+    this.scooterRuntimes.delete(personalId);
+  }
+
+  private releaseClientVehicle(sessionId: string, destroyOwnedPersonal: boolean): void {
+    const ps = this.state.players.get(sessionId);
+    const activeVehId = ps?.vehicleId || '';
+    if (activeVehId) {
+      const sc = this.state.scooters.get(activeVehId);
+      const wasDriver = sc?.driverSessionId === sessionId;
+      const attachedPassenger = wasDriver ? sc?.passengerSessionId || '' : '';
+      this.dismountSingleRider(sessionId);
+      if (destroyOwnedPersonal && attachedPassenger) {
+        this.dismountSingleRider(
+          attachedPassenger,
+          '🛵 Tài xế vừa rời kênh — bạn đã xuống xe an toàn!'
+        );
+      }
+    }
+
+    // Also sweep any scooter still referencing sessionId
+    for (const [sid, sc] of this.state.scooters.entries()) {
+      if (sc.driverSessionId === sessionId) {
+        sc.driverSessionId = '';
+      }
+      if (sc.passengerSessionId === sessionId) {
+        sc.passengerSessionId = '';
+      }
+      if (destroyOwnedPersonal && sc.kind === 'personal' && sc.ownerSessionId === sessionId) {
+        if (sc.passengerSessionId) {
+          this.dismountSingleRider(
+            sc.passengerSessionId,
+            '🛵 Tài xế vừa rời kênh — bạn đã xuống xe an toàn!'
+          );
+        }
+        if (sc.driverSessionId) {
+          this.dismountSingleRider(sc.driverSessionId);
+        }
+        this.state.scooters.delete(sid);
+        this.scooterRuntimes.delete(sid);
+      }
+    }
+  }
+
   private handleMovePacket(client: Client, bytes: Uint8Array): void {
     const ent = this.humanEntities.get(client.sessionId);
     if (!ent) return;
@@ -997,21 +1724,38 @@ export class CloudHuntingRoom extends Room<{
       }
     }
 
+    const ps = this.state.players.get(client.sessionId);
+    if (!ps) return;
+
+    // Passengers are authoritatively mirrored directly onto their driver's scooter rear anchor!
+    if (ps.vehicleRole === 'passenger' && ps.vehicleId) {
+      ent.warmBuff = pkt.warmBuff;
+      ent.lastSeq = pkt.seq;
+      ent.lastMoveAtMs = performance.now();
+      ent.hasReceivedMove = true;
+      return;
+    }
+
+    const isDriver = ps.vehicleRole === 'driver' && Boolean(ps.vehicleId);
+
     const now = performance.now();
     const wallNow = Date.now();
-    const dtSec = ent.hasReceivedMove ? clamp((now - ent.lastMoveAtMs) / 1000, 0.015, 0.5) : 0.083;
+    const rawWallDtSec = ent.hasReceivedMove ? clamp((now - ent.lastMoveAtMs) / 1000, 0, 2.5) : 0.083;
+    const dtSec = clamp(rawWallDtSec, 0.015, 0.5);
 
     // 1. Clamp horizontal world bounds [-445, 445]
     let nx = clamp(pkt.x, -445, 445);
     let nz = clamp(pkt.z, -445, 445);
 
-    // 2. O(1) jitter-tolerant leaky-bucket horizontal speed validation
+    // 2. O(1) jitter-tolerant Wall-Clock Token Bucket horizontal speed validation
+    // Absorbs up to ~1.2s of Wi-Fi / GC TCP packet batching at 69 km/h with zero false pose_correct rubber-banding!
     if (ent.hasReceivedMove) {
       const dx = nx - ent.x;
       const dz = nz - ent.z;
       const horizDist = Math.hypot(dx, dz);
-      const maxAllowedSpeed = WORLD_CONSTANTS.MAX_RUN_SPEED * 1.6; // 8.64 m/s
-      const stepBudget = dtSec * maxAllowedSpeed + ent.burstSlackMeters;
+      const maxAllowedSpeed = isDriver ? 26.5 : WORLD_CONSTANTS.MAX_RUN_SPEED * 1.65;
+      const maxSlack = isDriver ? 24.0 : 6.5;
+      const stepBudget = Math.min(maxSlack + rawWallDtSec * maxAllowedSpeed, ent.burstSlackMeters + rawWallDtSec * maxAllowedSpeed);
 
       if (horizDist > stepBudget) {
         // Allow legitimate Landmark Fast-Travel or Companion Friend-Teleport with a 200ms cooldown
@@ -1021,31 +1765,29 @@ export class CloudHuntingRoom extends Room<{
         ) {
           this.releaseClientBench(client.sessionId);
           ent.lastTeleportAtMs = wallNow;
-          ent.burstSlackMeters = 5.0;
+          ent.burstSlackMeters = maxSlack;
           ent.clampStreak = 0;
-          const ps = this.state.players.get(client.sessionId);
-          if (ps) {
-            ps.spawnX = nx;
-            ps.spawnY = sampleWalkableHeight(nx, nz);
-            ps.spawnZ = nz;
-            ps.spawnYaw = pkt.yaw;
-          }
+          ps.spawnX = nx;
+          ps.spawnY = sampleWalkableHeight(nx, nz);
+          ps.spawnZ = nz;
+          ps.spawnYaw = pkt.yaw;
         } else {
-          // Clamp horizontal displacement to leaky-bucket budget & reconcile persistent drift
+          // Clamp horizontal displacement to token-bucket budget & reconcile persistent speed-hack drift
           const cutMeters = horizDist - stepBudget;
           const scale = stepBudget / (horizDist || 1);
           nx = ent.x + dx * scale;
           nz = ent.z + dz * scale;
           ent.burstSlackMeters = 0;
-          if (cutMeters > 8.5) {
+          if (cutMeters > (isDriver ? 24.0 : 8.5)) {
             ent.clampStreak += 1;
-            if (ent.clampStreak >= 5) {
+            if (ent.clampStreak >= 6) {
               ent.clampStreak = 0;
               const groundClampY = sampleGroundHeight(nx, nz);
               const walkClampY = sampleWalkableHeight(nx, nz);
+              const maxAir = isDriver ? 28.0 : 6.5;
               const correction: ServerPoseCorrection = {
                 x: nx,
-                y: clamp(pkt.y, groundClampY - 0.5, walkClampY + 6.5),
+                y: clamp(pkt.y, groundClampY - 0.5, walkClampY + maxAir),
                 z: nz,
                 yaw: pkt.yaw,
                 reason: 'speed_clamp',
@@ -1055,24 +1797,26 @@ export class CloudHuntingRoom extends Room<{
           }
         }
       } else {
-        ent.burstSlackMeters = Math.min(4.5, stepBudget - horizDist);
+        ent.burstSlackMeters = Math.min(maxSlack, stepBudget - horizDist);
         ent.clampStreak = 0;
       }
     }
 
-    // 3. Terrain walkable height validation (prevents fly-hacks and underground clipping)
+    // 3. Terrain walkable height & ballistic crest-jump airtime validation (+26m envelope for flying scooters!)
     const walkY = sampleWalkableHeight(nx, nz);
-    let ny = clamp(pkt.y, walkY - 2.5, walkY + 6.5);
+    const maxAirHeight = isDriver ? 26.0 : 6.5;
+    let ny = clamp(pkt.y, walkY - 2.5, walkY + maxAirHeight);
     if (pkt.grounded && ny < walkY - 0.35) {
       ny = walkY;
     }
 
     // 4. Smooth horizontal velocity estimate for client Cubic Hermite spline tangents
+    const maxVelClamp = isDriver ? 24.5 : 11.5;
     if (ent.hasReceivedMove && pkt.moving && wallNow - ent.lastTeleportAtMs > 250) {
-      const instVx = clamp((nx - ent.x) / dtSec, -11.5, 11.5);
-      const instVz = clamp((nz - ent.z) / dtSec, -11.5, 11.5);
-      ent.vx = ent.vx * 0.35 + instVx * 0.65;
-      ent.vz = ent.vz * 0.35 + instVz * 0.65;
+      const instVx = clamp((nx - ent.x) / dtSec, -maxVelClamp, maxVelClamp);
+      const instVz = clamp((nz - ent.z) / dtSec, -maxVelClamp, maxVelClamp);
+      ent.vx = ent.vx * 0.32 + instVx * 0.68;
+      ent.vz = ent.vz * 0.32 + instVz * 0.68;
     } else if (!pkt.moving) {
       ent.vx = 0;
       ent.vz = 0;
@@ -1086,13 +1830,58 @@ export class CloudHuntingRoom extends Room<{
     ent.running = pkt.running;
     ent.grounded = pkt.grounded;
     ent.warmBuff = pkt.warmBuff;
+    ent.isDriving = isDriver;
+    ent.isPassenger = false;
+    ent.isBraking = isDriver ? Boolean(pkt.isBraking) : false;
     ent.lastSeq = pkt.seq;
     ent.lastMoveAtMs = now;
     ent.hasReceivedMove = true;
 
+    // 4b. Mirror live scooter transform & lock attached passenger's server entity 1:1 to rear pillion!
+    if (isDriver && ps.vehicleId) {
+      const sc = this.state.scooters.get(ps.vehicleId);
+      const rt = this.scooterRuntimes.get(ps.vehicleId);
+      if (sc) {
+        ent.headlightOn = sc.headlightOn;
+        if (rt) {
+          rt.liveX = nx;
+          rt.liveY = ny;
+          rt.liveZ = nz;
+          rt.liveYaw = pkt.yaw;
+          rt.lastActiveAtMs = wallNow;
+          // Only sync parked Schema coords when scooter is stationary (zero 1Hz React re-renders while driving!)
+          if (!pkt.moving && wallNow - rt.lastSchemaSyncAtMs >= 2500) {
+            sc.parkedX = nx;
+            sc.parkedY = sampleGroundHeight(nx, nz);
+            sc.parkedZ = nz;
+            sc.parkedYaw = pkt.yaw;
+            rt.lastSchemaSyncAtMs = wallNow;
+          }
+        }
+        if (sc.passengerSessionId) {
+          const pEnt = this.humanEntities.get(sc.passengerSessionId);
+          if (pEnt) {
+            const backOff = WORLD_CONSTANTS.SCOOTER_PILLION_BACK_OFFSET;
+            pEnt.x = nx - Math.sin(pkt.yaw) * backOff;
+            pEnt.y = ny;
+            pEnt.z = nz - Math.cos(pkt.yaw) * backOff;
+            pEnt.yaw = pkt.yaw;
+            pEnt.vx = ent.vx;
+            pEnt.vz = ent.vz;
+            pEnt.moving = pkt.moving;
+            pEnt.running = pkt.running;
+            pEnt.grounded = pkt.grounded;
+            pEnt.isDriving = false;
+            pEnt.isPassenger = true;
+            pEnt.isBraking = ent.isBraking;
+            pEnt.headlightOn = sc.headlightOn;
+          }
+        }
+      }
+    }
+
     // 5. Auto-release bench seat if player walks or fast-travels away (even if stationary on arrival)
-    const ps = this.state.players.get(client.sessionId);
-    if (ps && ps.seatId) {
+    if (ps.seatId) {
       const seatTransform = resolveBenchSeatTransform(ps.seatId);
       if (
         !seatTransform ||
@@ -1175,11 +1964,14 @@ export class CloudHuntingRoom extends Room<{
     ps.neckwear = resolveEffectiveNeckwear(outfit);
     ps.eyewear = resolveEffectiveEyewear(outfit);
     ps.bagStyle = resolveEffectiveBagStyle(outfit);
+    ps.scooterPaint = resolveEffectiveScooterPaint(outfit);
     ps.hairColor = outfit.hairColor;
     ps.backpack = outfit.backpack;
     ps.heldItem = heldItem;
     ps.emote = 'none';
     ps.seatId = '';
+    ps.vehicleId = '';
+    ps.vehicleRole = '';
     ps.isBot = false;
     ps.spawnX = rawX;
     ps.spawnY = spawnY;
@@ -1203,6 +1995,10 @@ export class CloudHuntingRoom extends Room<{
       running: false,
       grounded: true,
       warmBuff: true,
+      isDriving: false,
+      isPassenger: false,
+      isBraking: false,
+      headlightOn: true,
       hasReceivedMove: false,
       hydratedWorldInit: false,
       clampStreak: 0,
@@ -1213,6 +2009,7 @@ export class CloudHuntingRoom extends Room<{
       lastChatAtMs: 0,
       lastSocialAtMs: 0,
       lastJamAtMs: 0,
+      lastHornAtMs: 0,
       lastPolaroidAtMs: 0,
       lastChimeAtMs: 0,
       likedPolaroids: new Set<string>(),
@@ -1243,8 +2040,9 @@ export class CloudHuntingRoom extends Room<{
   }
 
   onDrop(client: Client): void {
-    // Free shared bench seat immediately while holding player's room slot for 45s network-blip reconnection
+    // Free shared bench & vehicle seat immediately while holding player's room slot for 45s reconnection
     this.releaseClientBench(client.sessionId);
+    this.releaseClientVehicle(client.sessionId, false);
     const ent = this.humanEntities.get(client.sessionId);
     if (ent) {
       ent.moving = false;
@@ -1261,6 +2059,7 @@ export class CloudHuntingRoom extends Room<{
       .catch(() => {
         this.pendingReconnections.delete(client.sessionId);
         this.releaseClientBench(client.sessionId);
+        this.releaseClientVehicle(client.sessionId, true);
         this.humanEntities.delete(client.sessionId);
         this.state.players.delete(client.sessionId);
         this.syncAmbientBots();
@@ -1279,6 +2078,7 @@ export class CloudHuntingRoom extends Room<{
   onLeave(client: Client): void {
     this.pendingReconnections.delete(client.sessionId);
     this.releaseClientBench(client.sessionId);
+    this.releaseClientVehicle(client.sessionId, true);
     this.humanEntities.delete(client.sessionId);
     this.state.players.delete(client.sessionId);
     this.syncAmbientBots();
@@ -1311,6 +2111,33 @@ export class CloudHuntingRoom extends Room<{
       }
     }
 
+    // Auto-return unoccupied station scooters abandoned > 90s away from their landmark home turnout
+    if (this.serverTick % 24 === 0) {
+      const wallNow = Date.now();
+      for (const [sid, rt] of this.scooterRuntimes.entries()) {
+        if (rt.kind !== 'station') continue;
+        const sc = this.state.scooters.get(sid);
+        if (!sc || sc.driverSessionId || sc.passengerSessionId) {
+          rt.lastActiveAtMs = wallNow;
+          continue;
+        }
+        const distFromHome = Math.hypot(rt.liveX - rt.homeX, rt.liveZ - rt.homeZ);
+        if (distFromHome > 4.0 && wallNow - rt.lastActiveAtMs >= 90_000) {
+          rt.liveX = rt.homeX;
+          rt.liveY = rt.homeY;
+          rt.liveZ = rt.homeZ;
+          rt.liveYaw = rt.homeYaw;
+          rt.lastActiveAtMs = wallNow;
+          rt.lastSchemaSyncAtMs = wallNow;
+          sc.parkedX = rt.homeX;
+          sc.parkedY = rt.homeY;
+          sc.parkedZ = rt.homeZ;
+          sc.parkedYaw = rt.homeYaw;
+          sc.headlightOn = true;
+        }
+      }
+    }
+
     // Collect all active human & ambient hiker peer transforms
     const allEntities: NearPeerTransform[] = [];
     for (const h of this.humanEntities.values()) {
@@ -1326,6 +2153,10 @@ export class CloudHuntingRoom extends Room<{
         running: h.running,
         grounded: h.grounded,
         warmBuff: h.warmBuff,
+        isDriving: h.isDriving,
+        isPassenger: h.isPassenger,
+        isBraking: h.isBraking,
+        headlightOn: h.headlightOn,
       });
     }
     if (this.ambientHikers) {

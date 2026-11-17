@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { ArrowUp, Sparkles } from 'lucide-react';
+import { playKickstandClack, playScooterHorn } from '../audio/highlandAudio';
 import { executeInteractPrompt } from '../gameplay/interactions';
 import { useNetController } from '../gameplay/netBridge';
 import { useGameStore } from '../store/gameStore';
@@ -21,6 +22,9 @@ export function MobileTouchControls() {
   const nearbyPrompt = useGameStore((s) => s.nearbyPrompt);
   const seatedBenchId = useGameStore((s) => s.seatedBenchId);
   const onboardingStep = useGameStore((s) => s.onboardingStep);
+  const localVehicleId = useGameStore((s) => s.localVehicleId);
+  const localVehicleRole = useGameStore((s) => s.localVehicleRole);
+  const incomingRideInvite = useGameStore((s) => s.incomingRideInvite);
 
   const isTouchDevice = isTouchCapable || qualityTier === 'mobile';
 
@@ -299,7 +303,11 @@ export function MobileTouchControls() {
           style={{
             position: 'absolute',
             right: 'var(--dl-safe-right)',
-            bottom: 'calc(var(--dl-safe-bottom) + 72px)',
+            bottom:
+              nearbyPrompt && !seatedBenchId && localVehicleRole === 'none'
+                ? 'calc(var(--dl-safe-bottom) + 152px)'
+                : 'calc(var(--dl-safe-bottom) + 72px)',
+            transition: 'bottom 180ms ease',
             display: 'flex',
             flexDirection: 'column',
             alignItems: 'center',
@@ -333,32 +341,234 @@ export function MobileTouchControls() {
             </button>
           )}
 
-          <button
-            type="button"
-            aria-label="Nhảy"
-            data-testid="mobile-jump-btn"
-            onTouchStart={(e) => {
-              e.stopPropagation();
-              useGameStore.getState().localTransient.jumpRequested = true;
-            }}
-            onClick={() => {
-              useGameStore.getState().localTransient.jumpRequested = true;
-            }}
-            className="dalat-glass-btn"
-            style={{
-              ...GLASS_PILL_STYLE,
-              width: '48px',
-              height: '48px',
-              padding: 0,
-              borderRadius: '50%',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: UI_COLORS.warmAmber,
-            }}
-          >
-            <ArrowUp size={20} />
-          </button>
+          {incomingRideInvite && localVehicleRole === 'none' && (
+            <button
+              type="button"
+              aria-label="Lên ngồi sau xe bạn bè"
+              title="Lên ngồi sau xe bạn bè"
+              onClick={() => {
+                playKickstandClack();
+                net.acceptScooterInvite(incomingRideInvite.scooterId);
+              }}
+              className="dalat-glass-btn"
+              style={{
+                ...GLASS_PILL_STYLE,
+                width: '46px',
+                height: '46px',
+                padding: 0,
+                borderRadius: '50%',
+                border: `1.5px solid ${UI_COLORS.warmAmber}`,
+                background: 'rgba(42, 30, 18, 0.92)',
+                color: UI_COLORS.warmAmber,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                fontSize: '18px',
+              }}
+            >
+              🛵
+            </button>
+          )}
+
+          {localVehicleRole === 'none' ? (
+            <>
+              <button
+                type="button"
+                aria-label="Gọi xe Super Cub 50"
+                title="Gọi xe Super Cub 50"
+                data-testid="mobile-scooter-summon-btn"
+                onClick={() => {
+                  playKickstandClack();
+                  net.summonScooter();
+                }}
+                className="dalat-glass-btn"
+                style={{
+                  ...GLASS_PILL_STYLE,
+                  width: '46px',
+                  height: '46px',
+                  padding: 0,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '18px',
+                }}
+              >
+                🛵
+              </button>
+
+              <button
+                type="button"
+                aria-label="Nhảy"
+                data-testid="mobile-jump-btn"
+                onTouchStart={(e) => {
+                  e.stopPropagation();
+                  useGameStore.getState().localTransient.jumpRequested = true;
+                }}
+                onClick={() => {
+                  useGameStore.getState().localTransient.jumpRequested = true;
+                }}
+                className="dalat-glass-btn"
+                style={{
+                  ...GLASS_PILL_STYLE,
+                  width: '48px',
+                  height: '48px',
+                  padding: 0,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  color: UI_COLORS.warmAmber,
+                }}
+              >
+                <ArrowUp size={20} />
+              </button>
+            </>
+          ) : localVehicleRole === 'driver' ? (
+            <>
+              <button
+                type="button"
+                aria-label="Bấm còi xe"
+                data-testid="mobile-scooter-horn-btn"
+                onClick={() => {
+                  playScooterHorn(1.0);
+                  net.sendScooterHorn();
+                }}
+                className="dalat-glass-btn"
+                style={{
+                  ...GLASS_PILL_STYLE,
+                  width: '44px',
+                  height: '44px',
+                  padding: 0,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '17px',
+                }}
+              >
+                📯
+              </button>
+
+              <button
+                type="button"
+                aria-label="Phanh sau & Drift"
+                data-testid="mobile-scooter-drift-btn"
+                onTouchStart={(e) => {
+                  e.stopPropagation();
+                  useGameStore.getState().localTransient.handbrakeHeld = true;
+                }}
+                onTouchEnd={(e) => {
+                  e.stopPropagation();
+                  useGameStore.getState().localTransient.handbrakeHeld = false;
+                }}
+                onTouchCancel={() => {
+                  useGameStore.getState().localTransient.handbrakeHeld = false;
+                }}
+                onPointerDown={() => {
+                  useGameStore.getState().localTransient.handbrakeHeld = true;
+                }}
+                onPointerUp={() => {
+                  useGameStore.getState().localTransient.handbrakeHeld = false;
+                }}
+                className="dalat-glass-btn"
+                style={{
+                  ...GLASS_PILL_STYLE,
+                  width: '46px',
+                  height: '46px',
+                  padding: 0,
+                  borderRadius: '50%',
+                  border: `1.5px solid ${UI_COLORS.warmAmber}`,
+                  color: UI_COLORS.warmAmber,
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '12px',
+                  fontWeight: 700,
+                }}
+              >
+                DRIFT
+              </button>
+
+              <button
+                type="button"
+                aria-label="Xuống xe"
+                data-testid="mobile-scooter-dismount-btn"
+                onClick={() => {
+                  useGameStore.getState().localTransient.handbrakeHeld = false;
+                  if (localVehicleId) {
+                    playKickstandClack();
+                    net.interactScooter(localVehicleId, 'dismount');
+                  }
+                }}
+                className="dalat-glass-btn"
+                style={{
+                  ...GLASS_PILL_STYLE,
+                  width: '46px',
+                  height: '46px',
+                  padding: 0,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '17px',
+                }}
+              >
+                🚶
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                aria-label="Đổi tư thế ngồi sau"
+                onClick={() => {
+                  if (localVehicleId) {
+                    net.interactScooter(localVehicleId, 'toggle_pose');
+                  }
+                }}
+                className="dalat-glass-btn"
+                style={{
+                  ...GLASS_PILL_STYLE,
+                  width: '44px',
+                  height: '44px',
+                  padding: 0,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '17px',
+                }}
+              >
+                🤍
+              </button>
+
+              <button
+                type="button"
+                aria-label="Xuống xe"
+                onClick={() => {
+                  if (localVehicleId) {
+                    playKickstandClack();
+                    net.interactScooter(localVehicleId, 'dismount');
+                  }
+                }}
+                className="dalat-glass-btn"
+                style={{
+                  ...GLASS_PILL_STYLE,
+                  width: '46px',
+                  height: '46px',
+                  padding: 0,
+                  borderRadius: '50%',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  fontSize: '17px',
+                }}
+              >
+                🚶
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>

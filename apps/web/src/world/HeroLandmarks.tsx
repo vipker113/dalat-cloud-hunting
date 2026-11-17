@@ -212,27 +212,6 @@ function LonelyPineFallback() {
   );
 }
 
-function VintageCubFallback() {
-  return (
-    <group name="VintageCubFallback">
-      <mesh position={[0, 0.55, 0]} castShadow>
-        <boxGeometry args={[1.45, 0.42, 0.34]} />
-        <meshStandardMaterial color="#5E8C76" roughness={0.38} metalness={0.22} />
-      </mesh>
-      <mesh position={[0.42, 0.88, 0]} rotation={[0, 0, -0.22]} castShadow>
-        <boxGeometry args={[0.18, 0.62, 0.52]} />
-        <meshStandardMaterial color="#F2EAD8" roughness={0.42} />
-      </mesh>
-      {[-0.55, 0.55].map((wx, idx) => (
-        <mesh key={idx} position={[wx, 0.32, 0]} rotation={[Math.PI / 2, 0, 0]} castShadow>
-          <torusGeometry args={[0.26, 0.065, 8, 16]} />
-          <meshStandardMaterial color="#242424" roughness={0.85} />
-        </mesh>
-      ))}
-    </group>
-  );
-}
-
 function CampfireStageFallback() {
   return (
     <group name="CampfireStageFallback">
@@ -303,7 +282,6 @@ export function HeroLandmarks() {
   const cafeScene = useSafeGlbClone('/assets/models/cafe_mo_suong.glb?v=gfx3');
   const cauGoScene = useSafeGlbClone('/assets/models/cau_go_bridge.glb?v=gfx3');
   const lonelyPineScene = useSafeGlbClone('/assets/models/lonely_pine_hero.glb');
-  const cub50Scene = useSafeGlbClone('/assets/models/vintage_cub50.glb');
   const campfireScene = useSafeGlbClone('/assets/models/campfire_stage.glb');
 
   const campfireLightRef = useRef<THREE.PointLight>(null);
@@ -311,7 +289,6 @@ export function HeroLandmarks() {
   const flameCoreRef = useRef<THREE.Mesh>(null);
 
   const lonelyPineY = useMemo(() => sampleGroundHeight(-95, -155), []);
-  const cub50Y = useMemo(() => sampleGroundHeight(19.8, 125.2), []);
 
   // Ground any built-in short stilt poles in cau_go_bridge.glb (local y < -1.2) all the way into solid hillside terrain!
   useEffect(() => {
@@ -506,16 +483,7 @@ export function HeroLandmarks() {
         {lonelyPineScene ? <primitive object={lonelyPineScene} /> : <LonelyPineFallback />}
       </group>
 
-      {/* 5. Vintage Honda Super Cub 50 parked at Đài Ngắm Thung Lũng Đèn [19.8, cub50Y, 125.2] */}
-      <group
-        position={[19.8, cub50Y, 125.2]}
-        rotation={[0, -0.68, 0]}
-        name="Landmark_VintageCub50"
-      >
-        {cub50Scene ? <primitive object={cub50Scene} /> : <VintageCubFallback />}
-      </group>
-
-      {/* 6. Acoustic Campfire Stage at [-53, 135.15, 24] with flickering #FF8C42 PointLight */}
+      {/* 5. Acoustic Campfire Stage at [-53, 135.15, 24] with flickering #FF8C42 PointLight */}
       <group position={[-53, 135.15, 24]} name="Landmark_CampfireStage">
         {campfireScene ? <primitive object={campfireScene} /> : <CampfireStageFallback />}
         <mesh ref={flameCoreRef} position={[0, 0.42, 0]} material={flameMaterial}>

@@ -4,6 +4,7 @@ import {
   type AvatarGender,
   type BagStyleId,
   type ChatBubbleMessage,
+  checkPedestrianDeckZone,
   type ClientMoveInput,
   type CoatStyleId,
   decodeWorldSnapshot,
@@ -18,15 +19,25 @@ import {
   type HeldItemId,
   type NeckwearId,
   normalizeRoomCode,
+  type PassengerPoseStyle,
   type PlayerOutfit,
   type PolaroidEntry,
   type PolaroidPinAck,
   resolveBenchSeatTransform,
   resolveEffectiveGender,
+  resolveEffectiveScooterPaint,
   ROOM_CODE_REGEX,
+  sampleGroundHeight,
   sampleWalkableHeight,
+  type ScooterPaintId,
+  type ScooterStateSnapshot,
   type ServerPoseCorrection,
   type SocialInteractKind,
+  type VehicleAckPayload,
+  type VehicleDuoTeleportEvent,
+  type VehicleHornEvent,
+  type VehicleRideInvite,
+  type VehicleRole,
   type WindChimeNote,
   WORLD_CONSTANTS,
 } from '@dalat/protocol';
@@ -36,7 +47,11 @@ import {
   type RoomChannelInfo,
   useGameStore,
 } from '../store/gameStore';
-import type { IMultiplayerController, SwitchChannelResult } from './types';
+import type {
+  IMultiplayerController,
+  ScooterInteractAction,
+  SwitchChannelResult,
+} from './types';
 
 const ROOM_NAME = 'cloud_hunting';
 const RING_BUFFER_CAPACITY = 4;
@@ -53,11 +68,14 @@ interface ReflectedPlayer {
   neckwear?: string;
   eyewear?: string;
   bagStyle?: string;
+  scooterPaint?: string;
   hairColor: string;
   backpack: boolean;
   heldItem: string;
   emote: string;
   seatId: string;
+  vehicleId?: string;
+  vehicleRole?: string;
   isBot: boolean;
   spawnX: number;
   spawnY: number;
@@ -65,8 +83,24 @@ interface ReflectedPlayer {
   spawnYaw: number;
 }
 
+interface ReflectedScooter {
+  scooterId: string;
+  kind: string;
+  ownerSessionId: string;
+  paintId: string;
+  plateLabel: string;
+  driverSessionId: string;
+  passengerSessionId: string;
+  passengerPose: string;
+  headlightOn: boolean;
+  parkedX: number;
+  parkedY: number;
+  parkedZ: number;
+  parkedYaw: number;
+}
+
 function buildProfileKey(displayName: string, o: PlayerOutfit): string {
-  return `${displayName}|${o.gender || ''}|${o.coatStyle}|${o.coatColor}|${o.scarfColor}|${o.headwear}|${o.neckwear || ''}|${o.eyewear || ''}|${o.bagStyle || ''}|${o.hairColor}|${o.backpack ? 1 : 0}`;
+  return `${displayName}|${o.gender || ''}|${o.coatStyle}|${o.coatColor}|${o.scarfColor}|${o.headwear}|${o.neckwear || ''}|${o.eyewear || ''}|${o.bagStyle || ''}|${o.scooterPaint || ''}|${o.hairColor}|${o.backpack ? 1 : 0}`;
 }
 
 interface ReflectedRoomState {
@@ -79,6 +113,10 @@ interface ReflectedRoomState {
   };
   occupiedBenches?: Map<string, string> & {
     forEach: (cb: (val: string, key: string) => void) => void;
+  };
+  scooters?: Map<string, ReflectedScooter> & {
+    forEach: (cb: (val: ReflectedScooter, key: string) => void) => void;
+    get: (key: string) => ReflectedScooter | undefined;
   };
 }
 
@@ -95,6 +133,10 @@ interface SnapshotSample {
   running: boolean;
   grounded: boolean;
   warmBuff: boolean;
+  isDriving: boolean;
+  isPassenger: boolean;
+  isBraking: boolean;
+  headlightOn: boolean;
 }
 
 class PeerSnapshotRingBuffer {
@@ -116,6 +158,10 @@ class PeerSnapshotRingBuffer {
       running: false,
       grounded: true,
       warmBuff: false,
+      isDriving: false,
+      isPassenger: false,
+      isBraking: false,
+      headlightOn: true,
     }));
   }
 
@@ -131,7 +177,11 @@ class PeerSnapshotRingBuffer {
     moving: boolean,
     running: boolean,
     grounded: boolean,
-    warmBuff: boolean
+    warmBuff: boolean,
+    isDriving = false,
+    isPassenger = false,
+    isBraking = false,
+    headlightOn = true
   ): void {
     if (this.count > 0) {
       const newestIdx = (this.head - 1 + RING_BUFFER_CAPACITY) % RING_BUFFER_CAPACITY;
@@ -155,6 +205,10 @@ class PeerSnapshotRingBuffer {
         newest.running = running;
         newest.grounded = grounded;
         newest.warmBuff = warmBuff;
+        newest.isDriving = isDriving;
+        newest.isPassenger = isPassenger;
+        newest.isBraking = isBraking;
+        newest.headlightOn = headlightOn;
         return;
       }
     }
@@ -172,6 +226,10 @@ class PeerSnapshotRingBuffer {
     slot.running = running;
     slot.grounded = grounded;
     slot.warmBuff = warmBuff;
+    slot.isDriving = isDriving;
+    slot.isPassenger = isPassenger;
+    slot.isBraking = isBraking;
+    slot.headlightOn = headlightOn;
 
     this.head = (this.head + 1) % RING_BUFFER_CAPACITY;
     if (this.count < RING_BUFFER_CAPACITY) {
@@ -992,6 +1050,162 @@ class MultiplayerClientController implements IMultiplayerController {
     }
   }
 
+  public summonScooter(paintId?: ScooterPaintId, autoMount = true): void {
+    const st = useGameStore.getState();
+    const chosenPaint = paintId || resolveEffectiveScooterPaint(st.outfit);
+    if (this.room && st.connected) {
+      this.room.send('vehicle_summon', { paintId: chosenPaint, autoMount });
+      return;
+    }
+
+    // Offline solo Super Cub 50 summon / stow fallback
+    const localSid = st.localSessionId || 'local';
+    const personalId = `cub-own-${localSid}`;
+    if (st.localVehicleId === personalId && st.localVehicleRole === 'driver') {
+      const lt = st.localTransient;
+      lt.x = clamp(lt.x - Math.cos(lt.yaw) * 0.9, -444, 444);
+      lt.z = clamp(lt.z + Math.sin(lt.yaw) * 0.9, -444, 444);
+      lt.y = sampleWalkableHeight(lt.x, lt.z);
+      lt.vx = 0;
+      lt.vy = 0;
+      lt.vz = 0;
+      st.setLocalVehicleState(null, 'none');
+      st.removeScooter(personalId);
+      st.showToast('🛵 Đã cất xe Super Cub 50 gọn gàng.');
+      return;
+    }
+
+    if (st.seatedBenchId) {
+      st.setSeatedBench(null);
+    }
+    const lt = st.localTransient;
+    const ped = checkPedestrianDeckZone(lt.x, lt.z);
+    const sx = clamp(ped.inside ? ped.pushX : lt.x, -442, 442);
+    const sz = clamp(ped.inside ? ped.pushZ : lt.z, -442, 442);
+    const sy = sampleGroundHeight(sx, sz);
+    const canMount = autoMount && Math.hypot(sx - lt.x, sz - lt.z) <= 5.5;
+
+    const sc: ScooterStateSnapshot = {
+      scooterId: personalId,
+      kind: 'personal',
+      ownerSessionId: localSid,
+      paintId: chosenPaint,
+      plateLabel: '49-AA 1968',
+      driverSessionId: canMount ? localSid : '',
+      passengerSessionId: '',
+      passengerPose: 'hold_waist',
+      headlightOn: true,
+      parkedX: sx,
+      parkedY: sy,
+      parkedZ: sz,
+      parkedYaw: lt.yaw,
+    };
+    st.upsertScooter(sc);
+    if (canMount) {
+      lt.x = sx;
+      lt.y = sy;
+      lt.z = sz;
+      st.setLocalVehicleState(personalId, 'driver');
+    } else if (ped.inside) {
+      st.showToast(`🛵 Đã dựng xe Super Cub chờ bạn ngay bên ngoài ${ped.zoneLabel}!`);
+    }
+  }
+
+  public interactScooter(scooterId: string, action: ScooterInteractAction): void {
+    const st = useGameStore.getState();
+    if (this.room && st.connected) {
+      this.room.send('vehicle_interact', { scooterId, action });
+      return;
+    }
+
+    // Offline solo Super Cub 50 mount / dismount / light / pose fallback
+    const localSid = st.localSessionId || 'local';
+    if (action === 'stow') {
+      this.summonScooter(undefined, false);
+      return;
+    }
+    if (action === 'dismount') {
+      const curId = st.localVehicleId;
+      if (!curId) return;
+      const curSc = st.scooters[curId];
+      const lt = st.localTransient;
+      if (curSc) {
+        st.upsertScooter({
+          ...curSc,
+          driverSessionId: curSc.driverSessionId === localSid ? '' : curSc.driverSessionId,
+          passengerSessionId:
+            curSc.passengerSessionId === localSid ? '' : curSc.passengerSessionId,
+          parkedX: lt.x,
+          parkedY: sampleGroundHeight(lt.x, lt.z),
+          parkedZ: lt.z,
+          parkedYaw: lt.yaw,
+        });
+      }
+      lt.x = clamp(lt.x - Math.cos(lt.yaw) * 0.9, -444, 444);
+      lt.z = clamp(lt.z + Math.sin(lt.yaw) * 0.9, -444, 444);
+      lt.y = sampleWalkableHeight(lt.x, lt.z);
+      lt.vx = 0;
+      lt.vy = 0;
+      lt.vz = 0;
+      st.setLocalVehicleState(null, 'none');
+      return;
+    }
+    if (action === 'toggle_light' && st.localVehicleId) {
+      const curSc = st.scooters[st.localVehicleId];
+      if (curSc) {
+        st.upsertScooter({ ...curSc, headlightOn: !curSc.headlightOn });
+      }
+      return;
+    }
+    if (action === 'toggle_pose' && st.localVehicleId) {
+      const curSc = st.scooters[st.localVehicleId];
+      if (curSc) {
+        st.upsertScooter({
+          ...curSc,
+          passengerPose: curSc.passengerPose === 'hold_waist' ? 'free_hands' : 'hold_waist',
+        });
+      }
+      return;
+    }
+
+    const target = st.scooters[scooterId];
+    if (!target) return;
+    st.setSeatedBench(null);
+    st.localTransient.x = target.parkedX;
+    st.localTransient.y = target.parkedY;
+    st.localTransient.z = target.parkedZ;
+    st.localTransient.yaw = target.parkedYaw;
+    st.upsertScooter({ ...target, driverSessionId: localSid });
+    st.setLocalVehicleState(target.scooterId, 'driver');
+  }
+
+  public acceptScooterInvite(scooterId: string): void {
+    const st = useGameStore.getState();
+    st.setIncomingRideInvite(null);
+    if (this.room && st.connected) {
+      this.room.send('vehicle_accept_invite', { scooterId });
+    }
+  }
+
+  public sendScooterHorn(): void {
+    const st = useGameStore.getState();
+    if (this.room && st.connected) {
+      this.room.send('vehicle_horn', {});
+      return;
+    }
+    if (st.localVehicleRole === 'driver' && st.localVehicleId) {
+      st.setLastHornEvent({
+        scooterId: st.localVehicleId,
+        senderId: st.localSessionId || 'local',
+        senderName: st.displayName,
+        x: st.localTransient.x,
+        y: st.localTransient.y,
+        z: st.localTransient.z,
+        timestamp: Date.now(),
+      });
+    }
+  }
+
   public sendJamNote(chordIndex: number, instrument: AcousticJamNote['instrument']): void {
     const clampedChord = clamp(Math.round(chordIndex), 0, 5);
     if (this.room && useGameStore.getState().connected) {
@@ -1130,6 +1344,10 @@ class MultiplayerClientController implements IMultiplayerController {
         peer.running = oldest.running;
         peer.grounded = oldest.grounded;
         peer.warmBuff = oldest.warmBuff;
+        peer.isDriving = oldest.isDriving;
+        peer.isPassenger = oldest.isPassenger;
+        peer.isBraking = oldest.isBraking;
+        peer.headlightOn = oldest.headlightOn;
         continue;
       }
 
@@ -1141,7 +1359,11 @@ class MultiplayerClientController implements IMultiplayerController {
         if (newest.moving && overshootMs < 260) {
           peer.x = newest.x + newest.vx * extrapSec * 0.65;
           peer.z = newest.z + newest.vz * extrapSec * 0.65;
-          peer.y = newest.grounded ? sampleWalkableHeight(peer.x, peer.z) : newest.y;
+          peer.y = newest.grounded
+            ? newest.isDriving
+              ? sampleGroundHeight(peer.x, peer.z)
+              : sampleWalkableHeight(peer.x, peer.z)
+            : newest.y;
           peer.moving = true;
           peer.running = newest.running;
         } else {
@@ -1156,6 +1378,10 @@ class MultiplayerClientController implements IMultiplayerController {
         peer.vz = newest.vz;
         peer.grounded = newest.grounded;
         peer.warmBuff = newest.warmBuff;
+        peer.isDriving = newest.isDriving;
+        peer.isPassenger = newest.isPassenger;
+        peer.isBraking = newest.isBraking;
+        peer.headlightOn = newest.headlightOn;
         continue;
       }
 
@@ -1175,9 +1401,10 @@ class MultiplayerClientController implements IMultiplayerController {
       const spanMs = b.recvMs - a.recvMs;
       const tickDelta = (b.serverTick - a.serverTick + 65536) % 65536;
       const stepDist = Math.hypot(b.x - a.x, b.z - a.z);
+      const maxInterpStep = a.isDriving || b.isDriving ? 24 : 12;
 
-      // Snap cleanly on >12m teleports or wraparound tick jumps without velocity tangent overshoot!
-      if (spanMs < 1 || stepDist > 12 || tickDelta > 120) {
+      // Snap cleanly on teleports or wraparound tick jumps without velocity tangent overshoot!
+      if (spanMs < 1 || stepDist > maxInterpStep || tickDelta > 120) {
         peer.x = b.x;
         peer.y = b.y;
         peer.z = b.z;
@@ -1188,6 +1415,10 @@ class MultiplayerClientController implements IMultiplayerController {
         peer.running = b.running;
         peer.grounded = b.grounded;
         peer.warmBuff = b.warmBuff;
+        peer.isDriving = b.isDriving;
+        peer.isPassenger = b.isPassenger;
+        peer.isBraking = b.isBraking;
+        peer.headlightOn = b.headlightOn;
         continue;
       }
 
@@ -1228,7 +1459,9 @@ class MultiplayerClientController implements IMultiplayerController {
       const smoothT = t2 * (3 - 2 * t);
       let iy = a.y + (b.y - a.y) * smoothT;
       if (a.grounded && b.grounded && Math.abs(b.y - a.y) < 1.5) {
-        iy = Math.max(iy, sampleWalkableHeight(ix, iz));
+        const floorY =
+          a.isDriving || b.isDriving ? sampleGroundHeight(ix, iz) : sampleWalkableHeight(ix, iz);
+        iy = Math.max(iy, floorY);
       }
 
       // Shortest-arc circular yaw Slerp on S^1
@@ -1245,6 +1478,10 @@ class MultiplayerClientController implements IMultiplayerController {
       peer.running = t < 0.5 ? a.running : b.running;
       peer.grounded = t < 0.5 ? a.grounded : b.grounded;
       peer.warmBuff = t < 0.5 ? a.warmBuff : b.warmBuff;
+      peer.isDriving = t < 0.5 ? a.isDriving : b.isDriving;
+      peer.isPassenger = t < 0.5 ? a.isPassenger : b.isPassenger;
+      peer.isBraking = t < 0.5 ? a.isBraking : b.isBraking;
+      peer.headlightOn = t < 0.5 ? a.headlightOn : b.headlightOn;
     }
   }
 
@@ -1276,6 +1513,17 @@ class MultiplayerClientController implements IMultiplayerController {
         rootProxy.occupiedBenches.onChange(syncBenches);
         rootProxy.occupiedBenches.onRemove(syncBenches);
       }
+
+      if (rootProxy?.scooters) {
+        const syncScooters = () => this.reconcileScootersDiff(room.state);
+        rootProxy.scooters.onAdd((sc: ReflectedScooter) => {
+          syncScooters();
+          const scProxy = $(sc);
+          scProxy?.onChange?.(syncScooters);
+        }, true);
+        rootProxy.scooters.onChange?.(syncScooters);
+        rootProxy.scooters.onRemove(syncScooters);
+      }
     }
 
     // Reconcile full state on initial ROOM_STATE & after reconnect decodeResync
@@ -1297,6 +1545,7 @@ class MultiplayerClientController implements IMultiplayerController {
       }
       this.reconcilePlayersDiff(room, state);
       this.reconcileOccupiedBenches(state);
+      this.reconcileScootersDiff(state);
     });
 
     // 2. 12 Hz Binary Snapshot Stream + AOI Tracking
@@ -1328,7 +1577,11 @@ class MultiplayerClientController implements IMultiplayerController {
           p.moving,
           p.running,
           p.grounded,
-          p.warmBuff
+          p.warmBuff,
+          p.isDriving,
+          p.isPassenger,
+          p.isBraking,
+          p.headlightOn
         );
 
         const sid = this.numericIdToSessionId.get(p.numericId);
@@ -1621,6 +1874,102 @@ class MultiplayerClientController implements IMultiplayerController {
       }
     });
 
+    // 8b. Vintage Super Cub 50 Multiplayer Vehicle & Tandem Events
+    room.onMessage('vehicle_ack', (ack: VehicleAckPayload) => {
+      this.markPacketReceived();
+      if (!ack) return;
+      const st = useGameStore.getState();
+      if (ack.ok) {
+        if (typeof ack.x === 'number' && Number.isFinite(ack.x) && typeof ack.z === 'number' && Number.isFinite(ack.z)) {
+          st.localTransient.x = ack.x;
+          st.localTransient.y =
+            typeof ack.y === 'number' && Number.isFinite(ack.y)
+              ? ack.y
+              : sampleGroundHeight(ack.x, ack.z);
+          st.localTransient.z = ack.z;
+          if (typeof ack.yaw === 'number' && Number.isFinite(ack.yaw)) {
+            st.localTransient.yaw = ack.yaw;
+            if (ack.role === 'driver' || ack.role === 'passenger') {
+              st.localTransient.cameraYaw = ack.yaw + Math.PI;
+              st.localTransient.cameraPitch = 0.2;
+            }
+          }
+          st.localTransient.vx = 0;
+          st.localTransient.vy = 0;
+          st.localTransient.vz = 0;
+        }
+        if (ack.role !== 'none' && st.seatedBenchId) {
+          st.setSeatedBench(null);
+        }
+        st.setLocalVehicleState(ack.scooterId ?? null, ack.role ?? 'none');
+        if (ack.reason) {
+          st.showToast(ack.reason);
+        }
+      } else if (ack.reason) {
+        st.showToast(ack.reason);
+      }
+    });
+
+    room.onMessage('vehicle_invite', (invite: VehicleRideInvite) => {
+      this.markPacketReceived();
+      if (!invite || !invite.scooterId) return;
+      const st = useGameStore.getState();
+      const stamped: VehicleRideInvite = {
+        ...invite,
+        timestamp: invite.timestamp || Date.now(),
+      };
+      const plate = st.scooters[stamped.scooterId]?.plateLabel || '49-AA';
+      st.setIncomingRideInvite(stamped);
+      st.showToast(
+        `🛵 ${stamped.fromName} mời bạn ngồi sau xe Super Cub (${plate}) — Nhấn [E] để lên xe!`
+      );
+      setTimeout(() => {
+        const cur = useGameStore.getState().incomingRideInvite;
+        if (cur && cur.timestamp === stamped.timestamp) {
+          useGameStore.getState().setIncomingRideInvite(null);
+        }
+      }, 14_000);
+    });
+
+    room.onMessage(
+      'vehicle_passenger_event',
+      (evt: { scooterId?: string; passengerName?: string; joined?: boolean }) => {
+        this.markPacketReceived();
+        if (!evt?.passengerName) return;
+        useGameStore
+          .getState()
+          .showToast(
+            evt.joined
+              ? `🛵 ${evt.passengerName} vừa ngồi lên yên sau xe bạn!`
+              : `🛵 ${evt.passengerName} đã xuống xe.`
+          );
+      }
+    );
+
+    room.onMessage('vehicle_horn', (evt: VehicleHornEvent) => {
+      this.markPacketReceived();
+      if (!evt || !evt.scooterId) return;
+      useGameStore.getState().setLastHornEvent(evt);
+    });
+
+    room.onMessage('vehicle_duo_teleport', (evt: VehicleDuoTeleportEvent) => {
+      this.markPacketReceived();
+      if (!evt || !Number.isFinite(evt.x) || !Number.isFinite(evt.z)) return;
+      const st = useGameStore.getState();
+      st.localTransient.x = evt.x;
+      st.localTransient.y = Number.isFinite(evt.y) ? evt.y : sampleGroundHeight(evt.x, evt.z);
+      st.localTransient.z = evt.z;
+      if (typeof evt.yaw === 'number' && Number.isFinite(evt.yaw)) {
+        st.localTransient.yaw = evt.yaw;
+      }
+      st.localTransient.vx = 0;
+      st.localTransient.vy = 0;
+      st.localTransient.vz = 0;
+      if (evt.landmarkName) {
+        st.showToast(`🛵 Tài xế vừa chở bạn tới ${evt.landmarkName}!`);
+      }
+    });
+
     // 9. Connection Drop / Reconnect / Leave Lifecycle
     room.onDrop(() => {
       useGameStore.getState().setNetworkStatus({ connected: false, connecting: true });
@@ -1646,6 +1995,8 @@ class MultiplayerClientController implements IMultiplayerController {
 
       const st = useGameStore.getState();
       st.resetPeers();
+      st.setLocalVehicleState(null, 'none');
+      st.setIncomingRideInvite(null);
       st.setNetworkStatus({
         connected: false,
         connecting: !this.manuallyDisconnected,
@@ -1674,6 +2025,15 @@ class MultiplayerClientController implements IMultiplayerController {
         }
       }
       this.localNumericId = player.numericId;
+      const nextVid = player.vehicleId || null;
+      const nextVRole: VehicleRole =
+        player.vehicleRole === 'driver' || player.vehicleRole === 'passenger'
+          ? player.vehicleRole
+          : 'none';
+      const stLocal = useGameStore.getState();
+      if (stLocal.localVehicleId !== nextVid || stLocal.localVehicleRole !== nextVRole) {
+        stLocal.setLocalVehicleState(nextVid, nextVRole);
+      }
       return;
     }
 
@@ -1696,6 +2056,9 @@ class MultiplayerClientController implements IMultiplayerController {
       bagStyle:
         (player.bagStyle as BagStyleId) ||
         (typeof player.backpack === 'boolean' && !player.backpack ? 'none' : 'trek_pack'),
+      scooterPaint: resolveEffectiveScooterPaint({
+        scooterPaint: player.scooterPaint as ScooterPaintId | undefined,
+      }),
       hairColor: player.hairColor || DEFAULT_OUTFIT.hairColor,
       backpack: typeof player.backpack === 'boolean' ? player.backpack : true,
     };
@@ -1703,6 +2066,11 @@ class MultiplayerClientController implements IMultiplayerController {
     const heldItem = (player.heldItem as HeldItemId) || 'none';
     const emote = (player.emote as EmoteId) || 'none';
     const seatId = player.seatId || '';
+    const vehicleId = player.vehicleId || '';
+    const vehicleRole: VehicleRole =
+      player.vehicleRole === 'driver' || player.vehicleRole === 'passenger'
+        ? player.vehicleRole
+        : 'none';
     const displayName = player.displayName || 'Lữ Khách';
     const isBot = Boolean(player.isBot);
 
@@ -1714,6 +2082,8 @@ class MultiplayerClientController implements IMultiplayerController {
       existing.heldItem === heldItem &&
       existing.emote === emote &&
       existing.seatId === seatId &&
+      existing.vehicleId === vehicleId &&
+      existing.vehicleRole === vehicleRole &&
       existing.outfit.gender === outfit.gender &&
       existing.outfit.coatStyle === outfit.coatStyle &&
       existing.outfit.coatColor === outfit.coatColor &&
@@ -1722,6 +2092,7 @@ class MultiplayerClientController implements IMultiplayerController {
       existing.outfit.neckwear === outfit.neckwear &&
       existing.outfit.eyewear === outfit.eyewear &&
       existing.outfit.bagStyle === outfit.bagStyle &&
+      existing.outfit.scooterPaint === outfit.scooterPaint &&
       existing.outfit.hairColor === outfit.hairColor &&
       existing.outfit.backpack === outfit.backpack
     ) {
@@ -1769,6 +2140,8 @@ class MultiplayerClientController implements IMultiplayerController {
       heldItem,
       emote,
       seatId,
+      vehicleId,
+      vehicleRole,
       isBot,
       x: initialX,
       y: initialY,
@@ -1780,6 +2153,10 @@ class MultiplayerClientController implements IMultiplayerController {
       running: existing?.running ?? latestSample?.running ?? false,
       grounded: existing?.grounded ?? latestSample?.grounded ?? true,
       warmBuff: existing?.warmBuff ?? latestSample?.warmBuff ?? true,
+      isDriving: existing?.isDriving ?? latestSample?.isDriving ?? false,
+      isPassenger: existing?.isPassenger ?? latestSample?.isPassenger ?? false,
+      isBraking: existing?.isBraking ?? latestSample?.isBraking ?? false,
+      headlightOn: existing?.headlightOn ?? latestSample?.headlightOn ?? true,
       lastNearSnapMs: existing?.lastNearSnapMs ?? latestSample?.recvMs,
       inNearAoi: existing?.inNearAoi ?? Boolean(latestSample),
     };
@@ -1843,6 +2220,71 @@ class MultiplayerClientController implements IMultiplayerController {
     }
     if (changed) {
       useGameStore.getState().setNetworkStatus({ occupiedBenches: nextMap });
+    }
+  }
+
+  private reconcileScootersDiff(state: ReflectedRoomState): void {
+    if (!state?.scooters) return;
+    const nextMap: Record<string, ScooterStateSnapshot> = {};
+    state.scooters.forEach((sc, key) => {
+      if (!sc) return;
+      const id = sc.scooterId || key;
+      if (!id) return;
+      nextMap[id] = {
+        scooterId: id,
+        kind: sc.kind === 'personal' ? 'personal' : 'station',
+        ownerSessionId: sc.ownerSessionId || '',
+        paintId: resolveEffectiveScooterPaint({
+          scooterPaint: sc.paintId as ScooterPaintId | undefined,
+        }),
+        plateLabel: sc.plateLabel || '49-AA 1893',
+        driverSessionId: sc.driverSessionId || '',
+        passengerSessionId: sc.passengerSessionId || '',
+        passengerPose:
+          (sc.passengerPose as PassengerPoseStyle) === 'free_hands' ? 'free_hands' : 'hold_waist',
+        headlightOn: sc.headlightOn !== false,
+        parkedX: Number.isFinite(sc.parkedX) ? sc.parkedX : 0,
+        parkedY: Number.isFinite(sc.parkedY)
+          ? sc.parkedY
+          : sampleGroundHeight(sc.parkedX || 0, sc.parkedZ || 0),
+        parkedZ: Number.isFinite(sc.parkedZ) ? sc.parkedZ : 0,
+        parkedYaw: Number.isFinite(sc.parkedYaw) ? sc.parkedYaw : 0,
+      };
+    });
+
+    const prevMap = useGameStore.getState().scooters;
+    const prevKeys = Object.keys(prevMap);
+    const nextKeys = Object.keys(nextMap);
+    let changed = prevKeys.length !== nextKeys.length;
+    if (!changed) {
+      for (let i = 0; i < nextKeys.length; i++) {
+        const k = nextKeys[i];
+        const a = prevMap[k];
+        const b = nextMap[k];
+        const activelyDriven = Boolean(b.driverSessionId);
+        if (
+          !a ||
+          a.kind !== b.kind ||
+          a.ownerSessionId !== b.ownerSessionId ||
+          a.paintId !== b.paintId ||
+          a.plateLabel !== b.plateLabel ||
+          a.driverSessionId !== b.driverSessionId ||
+          a.passengerSessionId !== b.passengerSessionId ||
+          a.passengerPose !== b.passengerPose ||
+          a.headlightOn !== b.headlightOn ||
+          (!activelyDriven &&
+            (Math.abs(a.parkedX - b.parkedX) > 0.02 ||
+              Math.abs(a.parkedY - b.parkedY) > 0.02 ||
+              Math.abs(a.parkedZ - b.parkedZ) > 0.02 ||
+              Math.abs(a.parkedYaw - b.parkedYaw) > 0.02))
+        ) {
+          changed = true;
+          break;
+        }
+      }
+    }
+    if (changed) {
+      useGameStore.getState().setScootersMap(nextMap);
     }
   }
 

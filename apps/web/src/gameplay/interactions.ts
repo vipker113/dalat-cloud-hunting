@@ -4,6 +4,7 @@ import {
   sampleWalkableHeight,
   SHARED_BENCHES,
 } from '@dalat/protocol';
+import { playKickstandClack, playScooterHorn } from '../audio/highlandAudio';
 import type { IMultiplayerController } from '../network/types';
 import { InteractPrompt, NearbyPeerInfo, useGameStore } from '../store/gameStore';
 
@@ -56,6 +57,11 @@ const MAX_VERTICAL_INTERACT_DIST = 2.3;
 export function evaluateNearbyPrompt(px: number, pz: number, py?: number): InteractPrompt | null {
   const st = useGameStore.getState();
   const playerY = typeof py === 'number' && Number.isFinite(py) ? py : st.localTransient.y;
+
+  // Keep 3D viewport clean while riding Super Cub 50 (dedicated speedometer HUD shows controls)
+  if (st.localVehicleRole !== 'none') {
+    return null;
+  }
 
   // If currently seated on a bench, allow standing up cleanly with [E]
   if (st.seatedBenchId) {
@@ -205,21 +211,63 @@ export function evaluateNearbyPrompt(px: number, pz: number, py?: number): Inter
     };
   }
 
-  // 6. Vintage Super Cub Overlook at Thung Lũng Đèn (< 3.6m horizontal, <= 2.3m vertical)
-  const dCub = dist2D(px, pz, INTERACTION_SPOTS.CUB_OVERLOOK[0], INTERACTION_SPOTS.CUB_OVERLOOK[2]);
-  if (
-    Math.abs(playerY - INTERACTION_SPOTS.CUB_OVERLOOK[1]) <= MAX_VERTICAL_INTERACT_DIST &&
-    dCub < 3.6 &&
-    dCub < bestScore
-  ) {
-    bestScore = dCub;
-    bestPrompt = {
-      id: 'cub-photo-spot',
-      label: 'Ngắm Thung Lũng Đèn bên xe Super Cub 50',
-      sublabel: 'Mở ống kính Film 35mm bắt trọn biển đèn vàng Thái Phiên',
-      actionType: 'cub_photo',
-      position: INTERACTION_SPOTS.CUB_OVERLOOK,
-    };
+  // 6. Live Drivable 2-Seater Super Cub 50 Fleet (Station & Personal Scooters)
+  const localSid = st.localSessionId || 'local';
+  for (const id in st.scooters) {
+    const sc = st.scooters[id];
+    if (!sc) continue;
+
+    let sx = sc.parkedX;
+    let sy = sc.parkedY;
+    let sz = sc.parkedZ;
+    let movingTooFast = false;
+
+    if (sc.driverSessionId && st.peers[sc.driverSessionId]) {
+      const dp = st.peers[sc.driverSessionId];
+      sx = dp.x;
+      sy = dp.y;
+      sz = dp.z;
+      if (Math.hypot(dp.vx, dp.vz) > 8.5) {
+        movingTooFast = true;
+      }
+    }
+    if (movingTooFast || Math.abs(playerY - sy) > 2.6) continue;
+
+    const d = dist2D(px, pz, sx, sz);
+    const canDrive =
+      !sc.driverSessionId && (sc.kind === 'station' || sc.ownerSessionId === localSid);
+    const canRidePillion =
+      !sc.passengerSessionId &&
+      ((Boolean(sc.driverSessionId) && sc.driverSessionId !== localSid) ||
+        (sc.kind === 'personal' && sc.ownerSessionId !== localSid));
+
+    if (canDrive && d < 3.6 && d < bestScore) {
+      bestScore = d;
+      bestPrompt = {
+        id: `scooter-drv-${sc.scooterId}`,
+        label: `Lái xe Super Cub 50 (${sc.plateLabel}) 🛵`,
+        sublabel: 'WASD Lái • Shift Vít ga 60km/h • Space Phanh Drift',
+        actionType: 'mount_scooter',
+        scooterId: sc.scooterId,
+        scooterTargetRole: 'driver',
+        position: [sx, sy + 0.85, sz],
+      };
+    } else if (canRidePillion && d < 4.1 && d < bestScore) {
+      bestScore = d;
+      const driverName =
+        (sc.driverSessionId && st.peers[sc.driverSessionId]?.displayName) ||
+        (sc.ownerSessionId && st.peers[sc.ownerSessionId]?.displayName) ||
+        'bạn đồng hành';
+      bestPrompt = {
+        id: `scooter-pas-${sc.scooterId}`,
+        label: `Ngồi sau xe của ${driverName} 🛵`,
+        sublabel: 'Cùng vi vu săn mây • [V] Đổi tư thế ôm eo / thả tay • [P] Chụp ảnh',
+        actionType: 'mount_scooter',
+        scooterId: sc.scooterId,
+        scooterTargetRole: 'passenger',
+        position: [sx, sy + 0.9, sz],
+      };
+    }
   }
 
   // 7. Deep Valley Safety Return Prompt when hiked down below y < 88m
@@ -310,7 +358,8 @@ export type PeerSocialActionKind =
   | 'gift_flower'
   | 'sparkler'
   | 'photo'
-  | 'sit_together';
+  | 'sit_together'
+  | 'invite_ride';
 
 let lastSocialChatMs = 0;
 
@@ -466,6 +515,18 @@ export function executePeerSocialAction(
     return;
   }
 
+  if (kind === 'invite_ride') {
+    net.sendSocialInteract(livePeer.sessionId, 'invite_ride');
+    net.sendScooterHorn();
+    playScooterHorn(0.95);
+    if (now - lastSocialChatMs > 2200) {
+      lastSocialChatMs = now;
+      net.sendChat(`Lên yên sau xe Super Cub đi săn mây cùng mình nè ${livePeer.displayName} ơi! 🛵✨`);
+    }
+    st.showToast(`🛵 Đã bấm còi mời ${livePeer.displayName} ngồi sau xe bạn!`);
+    return;
+  }
+
   if (kind === 'photo') {
     // Invite the peer to wave toward us and frame a flattering 50mm portrait!
     net.sendSocialInteract(livePeer.sessionId, 'greet');
@@ -598,6 +659,16 @@ export function executeInteractPrompt(prompt: InteractPrompt, net: IMultiplayerC
       st.setHeldItem('film_camera');
       net.sendHeldItem('film_camera');
       st.setPhotoMode(true);
+      break;
+    }
+    case 'mount_scooter': {
+      if (prompt.scooterId) {
+        playKickstandClack();
+        net.interactScooter(
+          prompt.scooterId,
+          prompt.scooterTargetRole === 'passenger' ? 'mount_passenger' : 'mount_driver'
+        );
+      }
       break;
     }
     case 'valley_return': {

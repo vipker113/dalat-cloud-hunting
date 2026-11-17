@@ -9,14 +9,17 @@ import {
   ensureCoatMatchesGender,
   HeldItemId,
   isWarmEdibleOrDrinkProp,
+  PassengerPoseStyle,
   PlayerOutfit,
   resolveEffectiveBagStyle,
   resolveEffectiveEyewear,
   resolveEffectiveGender,
   resolveEffectiveNeckwear,
   sampleWalkableHeight,
+  VehicleRole,
 } from '@dalat/protocol';
 import { useGameStore } from '../store/gameStore';
+import { readLiveScooterPoses } from './SuperCub50Vehicle';
 import {
   buildEyewearGroup,
   getCoatOverlayGeometry,
@@ -42,6 +45,10 @@ export interface AvatarMotionSample {
   windStrength: number;
   jamPulse?: number;
   turnBank?: number; // -1..1 subtle body roll into turns
+  vehicleRole?: VehicleRole;
+  passengerPose?: PassengerPoseStyle;
+  steerAngle?: number;
+  landingImpact?: number;
 }
 
 export interface HighlandAvatarProps {
@@ -364,6 +371,19 @@ const Q_GUITAR_L_UPPER = new THREE.Quaternion(0.7487, -0.1931, 0.2175, 0.5957);
 const Q_GUITAR_L_LOWER = new THREE.Quaternion(-0.2621, -0.2695, 0.6881, 0.6206);
 const Q_GUITAR_L_HAND = new THREE.Quaternion(0.2147, -0.5697, -0.1619, 0.7766);
 
+// Super Cub 50 driver handlebar grip & passenger waist-hold arm targets (twist-free symmetrical RPM space)
+const Q_CUB_DRV_R_UPPER = new THREE.Quaternion(0.382, -0.228, -0.462, 0.768).normalize();
+const Q_CUB_DRV_R_LOWER = new THREE.Quaternion(-0.185, 0.415, -0.462, 0.761).normalize();
+const Q_CUB_DRV_R_HAND = new THREE.Quaternion(0.04, 0.02, 0.11, 0.993).normalize();
+const Q_CUB_DRV_L_UPPER = new THREE.Quaternion(0.382, 0.228, 0.462, 0.768).normalize();
+const Q_CUB_DRV_L_LOWER = new THREE.Quaternion(-0.185, -0.415, 0.462, 0.761).normalize();
+const Q_CUB_DRV_L_HAND = new THREE.Quaternion(0.04, -0.02, -0.11, 0.993).normalize();
+
+const Q_CUB_WAIST_R_UPPER = new THREE.Quaternion(0.465, -0.115, -0.355, 0.803).normalize();
+const Q_CUB_WAIST_R_LOWER = new THREE.Quaternion(-0.145, 0.345, -0.665, 0.646).normalize();
+const Q_CUB_WAIST_L_UPPER = new THREE.Quaternion(0.465, 0.115, 0.355, 0.803).normalize();
+const Q_CUB_WAIST_L_LOWER = new THREE.Quaternion(-0.145, -0.345, 0.665, 0.646).normalize();
+
 const ANATOMICAL_GRIP_FINGER_QUATS: Record<string, THREE.Quaternion> = (() => {
   const mk = (rx: number, ry = 0, rz = 0) =>
     new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz, 'XYZ'));
@@ -664,6 +684,8 @@ export function HighlandAvatar({
     smoothGuitarWeight: 0,
     smoothGuitarFront: heldItem === 'guitar' ? 1 : 0,
     smoothPhotoWeight: 0,
+    smoothDriverGripWeight: 0,
+    smoothWaistHoldWeight: 0,
     weights: {
       Idle: 1,
       Walk: 0,
@@ -945,20 +967,22 @@ export function HighlandAvatar({
     const m = getMotion();
     cs.idleClock += dt;
 
-    const isSeated = m.seated || m.emote === 'sit_chill';
+    const onScooter = m.vehicleRole === 'driver' || m.vehicleRole === 'passenger';
+    const isSeated = m.seated || onScooter || m.emote === 'sit_chill';
     const jamLevel = Math.max(0, m.jamPulse ?? 0);
-    const activeStrumming = m.emote === 'play_guitar' || jamLevel > 0.02;
+    const activeStrumming = !onScooter && (m.emote === 'play_guitar' || jamLevel > 0.02);
 
     if (rigState) {
       const { mixer, actions } = rigState;
 
-      // Tuck off bulky back-worn packs while seated against backrest so back leans flush on the wooden bench
-      const showBuiltInTrekPack = effBag === 'trek_pack' && !isSeated;
+      // Tuck off bulky back-worn packs while seated on bench or driving Super Cub (passenger keeps backpack!)
+      const hideBackPack = m.seated || m.vehicleRole === 'driver' || m.emote === 'sit_chill';
+      const showBuiltInTrekPack = effBag === 'trek_pack' && !hideBackPack;
       for (let i = 0; i < rigState.backpackObjs.length; i++) {
         rigState.backpackObjs[i].visible = showBuiltInTrekPack;
       }
       if (customBagMeshRef.current) {
-        customBagMeshRef.current.visible = !isSeated || effBag === 'canvas_tote';
+        customBagMeshRef.current.visible = !hideBackPack || effBag === 'canvas_tote';
       }
 
       // 1. Gait-pure 4-way locomotion blend tree (Idle <-> Walk <-> Run <-> Sprint, zero .reset() snaps!)
@@ -1135,8 +1159,11 @@ export function HighlandAvatar({
           ? Math.sin(curCyclePhase * Math.PI * 4) * 0.008 * Math.min(1, gaitSum)
           : 0;
       const baseGroundY = !isMaleRig ? 0.006 : 0.003;
-      const targetSeatY = isSeated ? -0.41 + baseGroundY : baseGroundY + strideBob;
-      const targetSeatZ = isSeated ? 0.055 : 0;
+      const landingCrouch = onScooter ? -(m.landingImpact ?? 0) * 0.055 : 0;
+      const targetSeatY = isSeated
+        ? -0.41 + baseGroundY + landingCrouch
+        : baseGroundY + strideBob;
+      const targetSeatZ = isSeated ? (onScooter ? 0.02 : 0.055) : 0;
       const seatBlend = 1 - Math.exp(-14 * dt);
       cs.smoothSeatY += (targetSeatY - cs.smoothSeatY) * seatBlend;
       cs.smoothSeatZ += (targetSeatZ - cs.smoothSeatZ) * seatBlend;
@@ -1154,26 +1181,36 @@ export function HighlandAvatar({
           ? Math.sin(curCyclePhase * Math.PI * 2) * 0.15 * Math.min(1, gaitSum)
           : 0;
 
-      // 4. Post-mixer twist-free anatomical carry, sip, cheers, guitar strum & camera viewfinder IK
+      // 4. Post-mixer twist-free anatomical carry, sip, cheers, guitar strum, Super Cub handlebar & viewfinder IK
+      const isDriver = m.vehicleRole === 'driver';
+      const isWaistPassenger =
+        m.vehicleRole === 'passenger' &&
+        m.passengerPose !== 'free_hands' &&
+        m.emote !== 'snap_photo';
+
       const fullBodyEmoteActive =
         !isSeated &&
         !m.moving &&
         (m.emote === 'wave' || m.emote === 'warm_hands' || m.emote === 'cheer_sunrise');
-      const wantsPhoto = !fullBodyEmoteActive && m.emote === 'snap_photo';
+      const wantsPhoto = !fullBodyEmoteActive && !isDriver && m.emote === 'snap_photo';
       const wantsGuitar =
         !fullBodyEmoteActive &&
+        !onScooter &&
         !wantsPhoto &&
         (activeStrumming || (heldItem === 'guitar' && !m.moving));
       const wantsCarry =
         !fullBodyEmoteActive &&
+        !isDriver &&
+        !isWaistPassenger &&
         !wantsGuitar &&
         heldItem !== 'none' &&
         heldItem !== 'guitar';
       const isWarmItem = isWarmEdibleOrDrinkProp(heldItem);
       const wantsSip =
-        !fullBodyEmoteActive && !wantsPhoto && m.emote === 'sip_drink' && isWarmItem;
+        !fullBodyEmoteActive && !isDriver && !wantsPhoto && m.emote === 'sip_drink' && isWarmItem;
       const wantsCheers =
         !fullBodyEmoteActive &&
+        !isDriver &&
         !wantsPhoto &&
         m.emote === 'cheers_cup' &&
         (isWarmItem || heldItem === 'sparkler');
@@ -1183,14 +1220,22 @@ export function HighlandAvatar({
       cs.smoothCheersWeight += ((wantsCheers ? 1 : 0) - cs.smoothCheersWeight) * (1 - Math.exp(-9 * dt));
       cs.smoothGuitarWeight += ((wantsGuitar ? 1 : 0) - cs.smoothGuitarWeight) * (1 - Math.exp(-10 * dt));
       cs.smoothPhotoWeight += ((wantsPhoto ? 1 : 0) - cs.smoothPhotoWeight) * (1 - Math.exp(-11 * dt));
+      cs.smoothDriverGripWeight +=
+        ((isDriver ? 1 : 0) - cs.smoothDriverGripWeight) * (1 - Math.exp(-14 * dt));
+      cs.smoothWaistHoldWeight +=
+        ((isWaistPassenger ? 1 : 0) - cs.smoothWaistHoldWeight) * (1 - Math.exp(-12 * dt));
 
       const targetGuitarFront =
-        activeStrumming || (heldItem === 'guitar' && !m.moving) ? 1.0 : 0.0;
+        !onScooter && (activeStrumming || (heldItem === 'guitar' && !m.moving)) ? 1.0 : 0.0;
       cs.smoothGuitarFront +=
         (targetGuitarFront - cs.smoothGuitarFront) * (1 - Math.exp(-10 * dt));
 
+      if (handSocketRef.current) {
+        handSocketRef.current.visible = !isDriver && !isWaistPassenger;
+      }
       if (chestSocketRef.current) {
-        chestSocketRef.current.visible = heldItem === 'guitar' || cs.smoothGuitarWeight > 0.04;
+        chestSocketRef.current.visible =
+          !onScooter && (heldItem === 'guitar' || cs.smoothGuitarWeight > 0.04);
       }
       if (guitarInnerGroupRef.current) {
         const gf = cs.smoothGuitarFront;
@@ -1210,18 +1255,23 @@ export function HighlandAvatar({
           heldItem !== 'film_camera' && cs.smoothPhotoWeight > 0.12;
       }
 
-      // Organic subtle chest breathing, acoustic jam groove & head look/shutter nod
+      // Organic subtle chest breathing, forward riding posture, acoustic jam groove & head look
       if (rigState.chestBone) {
         const jamGroove = activeStrumming ? Math.sin(cs.idleClock * 5.2) * 0.028 : 0;
-        const breathPitch = Math.sin(cs.idleClock * 1.85) * 0.015 + jamGroove;
+        const rideLean =
+          cs.smoothDriverGripWeight * 0.11 + cs.smoothWaistHoldWeight * 0.085;
+        const breathPitch = Math.sin(cs.idleClock * 1.85) * 0.015 + jamGroove + rideLean;
         _tmpEuler.set(breathPitch, 0, activeStrumming ? Math.cos(cs.idleClock * 2.6) * 0.022 : 0);
         rigState.chestBone.quaternion.multiply(_tmpQuat.setFromEuler(_tmpEuler));
       }
       if (rigState.headBone) {
-        const lookYaw = cs.smoothBankRoll * 0.95 + Math.sin(cs.idleClock * 0.68) * 0.022;
+        const steerGaze = isDriver ? (m.steerAngle ?? 0) * 0.42 : 0;
+        const lookYaw =
+          cs.smoothBankRoll * 0.95 + steerGaze + Math.sin(cs.idleClock * 0.68) * 0.022;
         const sipNod =
           cs.smoothSipWeight * 0.12 +
-          cs.smoothPhotoWeight * 0.06 +
+          cs.smoothPhotoWeight * 0.06 -
+          cs.smoothDriverGripWeight * 0.07 +
           (activeStrumming ? Math.sin(cs.idleClock * 5.2) * 0.045 : 0);
         _tmpEuler.set(sipNod, lookYaw, cs.smoothPhotoWeight * -0.05);
         rigState.headBone.quaternion.multiply(_tmpQuat.setFromEuler(_tmpEuler));
@@ -1317,6 +1367,56 @@ export function HighlandAvatar({
         rigState.lowerArmLBone.quaternion.slerp(_tmpQuatLB, leftArmInfluence);
         if (rigState.handLBone) {
           rigState.handLBone.quaternion.slerp(_tmpQuatLC, leftArmInfluence);
+        }
+      }
+
+      // Dual-arm Super Cub 50 Handlebar Grip (Driver) & Affectionate Waist-Hold (Passenger)
+      const scooterArmWeight = Math.max(cs.smoothDriverGripWeight, cs.smoothWaistHoldWeight);
+      if (scooterArmWeight > 0.003) {
+        const waistMix =
+          scooterArmWeight > 0.0001
+            ? THREE.MathUtils.clamp(cs.smoothWaistHoldWeight / scooterArmWeight, 0, 1)
+            : 0;
+        const steerPush = (m.steerAngle ?? 0) * 0.24 * (1 - waistMix);
+
+        if (rigState.upperArmRBone && rigState.lowerArmRBone) {
+          _tmpQuatA.copy(Q_CUB_DRV_R_UPPER).slerp(Q_CUB_WAIST_R_UPPER, waistMix);
+          _tmpQuatB.copy(Q_CUB_DRV_R_LOWER).slerp(Q_CUB_WAIST_R_LOWER, waistMix);
+          if (Math.abs(steerPush) > 0.001) {
+            // Turning left (steerAngle > 0) pushes right grip forward (-steerPush)
+            _tmpEuler.set(-steerPush, 0, 0);
+            _tmpQuatA.multiply(_tmpQuat.setFromEuler(_tmpEuler));
+          }
+          if (rigState.shoulderRBone) {
+            rigState.shoulderRBone.quaternion.slerp(Q_CARRY_SHOULDER, scooterArmWeight * 0.88);
+          }
+          rigState.upperArmRBone.quaternion.slerp(_tmpQuatA, scooterArmWeight);
+          rigState.lowerArmRBone.quaternion.slerp(_tmpQuatB, scooterArmWeight);
+          if (rigState.handRBone) {
+            rigState.handRBone.quaternion.slerp(Q_CUB_DRV_R_HAND, scooterArmWeight);
+          }
+          for (let i = 0; i < rigState.fingerRBones.length; i++) {
+            const fb = rigState.fingerRBones[i];
+            fb.bone.quaternion.slerp(fb.gripQuat, scooterArmWeight * 0.95);
+          }
+        }
+
+        if (rigState.upperArmLBone && rigState.lowerArmLBone) {
+          _tmpQuatLA.copy(Q_CUB_DRV_L_UPPER).slerp(Q_CUB_WAIST_L_UPPER, waistMix);
+          _tmpQuatLB.copy(Q_CUB_DRV_L_LOWER).slerp(Q_CUB_WAIST_L_LOWER, waistMix);
+          if (Math.abs(steerPush) > 0.001) {
+            // Turning left (steerAngle > 0) pulls left grip back (+steerPush)
+            _tmpEuler.set(steerPush, 0, 0);
+            _tmpQuatLA.multiply(_tmpQuat.setFromEuler(_tmpEuler));
+          }
+          if (rigState.shoulderLBone) {
+            rigState.shoulderLBone.quaternion.slerp(Q_PHOTO_L_SHOULDER, scooterArmWeight * 0.88);
+          }
+          rigState.upperArmLBone.quaternion.slerp(_tmpQuatLA, scooterArmWeight);
+          rigState.lowerArmLBone.quaternion.slerp(_tmpQuatLB, scooterArmWeight);
+          if (rigState.handLBone) {
+            rigState.handLBone.quaternion.slerp(Q_CUB_DRV_L_HAND, scooterArmWeight);
+          }
         }
       }
 
@@ -1444,6 +1544,7 @@ export function HighlandAvatar({
     }
 
     if (shadowRef.current && avatarRootRef.current) {
+      shadowRef.current.visible = !onScooter;
       const targetShadowScale = isSeated ? 0.86 : m.grounded ? 1.0 : 0.78;
       shadowRef.current.scale.setScalar(targetShadowScale);
       const targetShadowOpacity = isSeated ? 0.30 : m.grounded ? 0.42 : 0.15;
@@ -1695,6 +1796,7 @@ export function LocalPlayerAvatar() {
       (st.lastJamNote.senderId === st.localSessionId || st.lastJamNote.senderId === 'local');
 
     const m = motionSample.current;
+    const sc = st.localVehicleId ? st.scooters[st.localVehicleId] : undefined;
     m.moving = dressing ? false : lt.moving;
     m.running = dressing ? false : lt.running;
     m.grounded = dressing ? true : lt.grounded;
@@ -1705,6 +1807,10 @@ export function LocalPlayerAvatar() {
     m.temperatureC = st.atmosphere.temperatureC;
     m.windStrength = st.atmosphere.windStrength;
     m.jamPulse = isMyJam && jamAge < 1.4 ? 1 - jamAge / 1.4 : 0;
+    m.vehicleRole = dressing ? 'none' : st.localVehicleRole;
+    m.passengerPose = sc?.passengerPose ?? 'hold_waist';
+    m.steerAngle = dressing ? 0 : lt.scooterSteerRad;
+    m.landingImpact = dressing ? 0 : lt.scooterLandingImpact;
     return m;
   };
 
@@ -1717,14 +1823,29 @@ export function LocalPlayerAvatar() {
     let renderYaw = lt.yaw;
     if (groupRef.current) {
       groupRef.current.visible = !st.photoModeActive;
-      groupRef.current.position.set(lt.x, lt.y, lt.z);
-      if (dressing) {
-        // Face smoothly toward the dressing portrait camera + user's 360° turntable drag angle!
-        const toCamYaw = Math.atan2(camera.position.x - lt.x, camera.position.z - lt.z);
-        renderYaw = toCamYaw - 0.16 + lt.previewCurrentYaw;
-        groupRef.current.rotation.y = renderYaw;
+      const activeScooterPose =
+        !dressing && st.localVehicleRole !== 'none' && st.localVehicleId
+          ? readLiveScooterPoses().get(st.localVehicleId)
+          : undefined;
+
+      if (activeScooterPose) {
+        const anchor =
+          st.localVehicleRole === 'driver'
+            ? activeScooterPose.driverAnchorPos
+            : activeScooterPose.pillionAnchorPos;
+        groupRef.current.position.copy(anchor);
+        groupRef.current.quaternion.copy(activeScooterPose.chassisQuat);
+        renderYaw = activeScooterPose.yaw;
       } else {
-        groupRef.current.rotation.y = lt.yaw;
+        groupRef.current.position.set(lt.x, lt.y, lt.z);
+        if (dressing) {
+          // Face smoothly toward the dressing portrait camera + user's 360° turntable drag angle!
+          const toCamYaw = Math.atan2(camera.position.x - lt.x, camera.position.z - lt.z);
+          renderYaw = toCamYaw - 0.16 + lt.previewCurrentYaw;
+          groupRef.current.rotation.set(0, renderYaw, 0);
+        } else {
+          groupRef.current.rotation.set(0, lt.yaw, 0);
+        }
       }
     }
 
